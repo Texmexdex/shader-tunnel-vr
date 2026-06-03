@@ -2,15 +2,17 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Truchet Tunnel 3D</title>
+<title>Truchet Tunnel — XR</title>
 <style>
   html,body{margin:0;padding:0;overflow:hidden;background:#000;font-family:system-ui,sans-serif}
   canvas{display:block;width:100vw;height:100vh;cursor:crosshair}
-  #info{position:fixed;bottom:12px;left:50%;transform:translateX(-50%);color:#555;font-size:13px;pointer-events:none;text-align:center}
+  #info{position:fixed;bottom:12px;left:0;right:0;color:#777;font-size:13px;pointer-events:none;text-align:center}
+  #vr{position:fixed;top:12px;right:12px;padding:8px 12px;background:#fff;color:#000;border:none;cursor:pointer;border-radius:4px;font-weight:600;display:none}
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
+<button id="vr">ENTER VR</button>
 <div id="info">drag=look &middot; scroll=move &middot; F=fullscreen</div>
 <script>
 "use strict";
@@ -19,14 +21,12 @@ const gl = canvas.getContext("webgl", {antialias:false, alpha:false})
        || canvas.getContext("experimental-webgl");
 if (!gl) { document.body.innerHTML = '<div style="color:#fff;padding:40px">WebGL not supported.</div>'; throw "no gl"; }
 
-// --- camera ---
-let yaw = 0.0;
-let pitch = 0.0;
-let camX = 0.0;
-let camY = 0.0;
-let camZ = 0.0;
-let dragging = false;
-let lastX = 0, lastY = 0;
+// --- state ---
+let yaw = 0.0, pitch = 0.0;
+let camX = 0.0, camY = 0.0, camZ = 0.0;
+let dragging = false, lastX = 0, lastY = 0;
+let xrSession = null;
+let xrRefSpace = null;
 
 canvas.addEventListener("mousedown", e => { dragging = true; lastX = e.clientX; lastY = e.clientY; });
 window.addEventListener("mouseup", () => { dragging = false; });
@@ -39,20 +39,17 @@ window.addEventListener("mousemove", e => {
 });
 
 canvas.addEventListener("wheel", e => {
+  if (xrSession) return;
   const cy = Math.cos(yaw), sy = Math.sin(yaw);
   const cp = Math.cos(pitch), sp = Math.sin(pitch);
-  const fx = cp * sy;
-  const fy = sp;
-  const fz = cp * cy;
+  const fx = cp * sy, fy = sp, fz = cp * cy;
   const amt = e.deltaY * 0.015;
-  camX += fx * amt;
-  camY += fy * amt;
-  camZ += fz * amt;
+  camX += fx * amt; camY += fy * amt; camZ += fz * amt;
   e.preventDefault();
 }, {passive: true});
 
 window.addEventListener("keydown", e => {
-  if (e.key === "f" || e.key === "F") {
+  if (e.key.toLowerCase() === "f") {
     if (document.fullscreenElement) document.exitFullscreen();
     else document.body.requestFullscreen().catch(()=>{});
   }
@@ -67,7 +64,43 @@ function resize() {
 window.addEventListener("resize", resize);
 resize();
 
-// --- shader sources ---
+// --- XR ---
+const vrBtn = document.getElementById("vr");
+if (navigator.xr) {
+  navigator.xr.isSessionSupported("immersive-vr").then(ok => {
+    if (ok) vrBtn.style.display = "block";
+  });
+}
+
+vrBtn.addEventListener("click", async () => {
+  try {
+    const session = await navigator.xr.requestSession("immersive-vr", {
+      optionalFeatures: ["local-floor"]
+    });
+    xrSession = session;
+    vrBtn.textContent = "LEAVE VR";
+    vrBtn.style.background = "#f44"; vrBtn.style.color = "#fff";
+
+    session.addEventListener("end", () => {
+      xrSession = null;
+      xrRefSpace = null;
+      vrBtn.textContent = "ENTER VR";
+      vrBtn.style.background = "#fff"; vrBtn.style.color = "#000";
+      resize();
+    });
+
+    await gl.makeXRCompatible();
+    xrRefSpace = await session.requestReferenceSpace("local-floor");
+    const layer = new XRWebGLLayer(session, gl, {antialias:false});
+    session.updateRenderState({baseLayer: layer});
+    session.requestAnimationFrame(renderXR);
+  } catch (err) {
+    console.error("XR error:", err);
+    alert("Could not start VR session.\n" + err.message);
+  }
+});
+
+// --- shaders ---
 const VERT = `attribute vec2 a_pos;
 void main() { gl_Position = vec4(a_pos, 0.0, 1.0); }`;
 
@@ -76,22 +109,21 @@ precision highp float;
 
 uniform float T;
 uniform vec2  R;
-uniform vec2  YP;
+uniform vec3  EyeFwd;
+uniform vec3  EyeRight;
+uniform vec3  EyeUp;
 uniform vec3  CamPos;
 
-// --- constants ---
 #define MAX_STEPS 80
 #define MAX_DIST  40.0
 #define SURF_EPS  0.002
 
-// --- hash ---
 float hash(vec3 p) {
   p = fract(p * vec3(443.8975, 441.4236, 437.1954));
   p += dot(p, p.yzx + 19.19);
   return fract((p.x + p.y) * p.z);
 }
 
-// --- truchet shapes ---
 float arc(vec3 pos) {
   float r = length(pos.xy);
   float ax = pow(abs(r - 0.5), 8.0);
@@ -106,7 +138,6 @@ float cell(vec3 pos) {
   ), arc(vec3(1.0 - pos.y, 1.0 - pos.z, pos.x)));
 }
 
-// --- SDF with 8 mirrored variants ---
 float SDF(vec3 p) {
   vec3 f = fract(p);
   vec3 g = floor(p);
@@ -123,7 +154,6 @@ float SDF(vec3 p) {
   return cell(q);
 }
 
-// --- normal via central differences ---
 vec3 normal(vec3 p) {
   float e = 0.0005;
   float h = SDF(p);
@@ -135,25 +165,14 @@ vec3 normal(vec3 p) {
 }
 
 void main() {
-  // Normalised screen coords
   vec2 uv = (2.0 * gl_FragCoord.xy - R) / length(R);
-
-  // Camera orientation
-  float cy = cos(YP.x), sy = sin(YP.x);
-  float cp = cos(YP.y), sp = sin(YP.y);
-  vec3 fwd = normalize(vec3(cp * sy, sp, cp * cy));
-  vec3 rgt = normalize(vec3(cy, 0.0, -sy));
-  vec3 up  = normalize(cross(rgt, fwd));
-  vec3 rd  = normalize(fwd + uv.x * rgt + uv.y * up);
-
-  // Camera position from JS (moves in facing direction)
+  vec3 ray = normalize(EyeFwd + uv.x * EyeRight + uv.y * EyeUp);
   vec3 ro = CamPos + vec3(0.25, 0.25, 0.5);
 
-  // --- proper sphere trace ---
   float t = 0.0;
   float steps = -1.0;
   for (int j = 0; j < MAX_STEPS; j++) {
-    vec3 p = ro + rd * t;
+    vec3 p = ro + ray * t;
     float d = SDF(p);
     if (d < SURF_EPS) { steps = float(j); break; }
     t += max(d, 0.0005);
@@ -164,13 +183,13 @@ void main() {
   if (steps < 0.0) {
     col = vec3(0.02);
   } else if (steps >= float(MAX_STEPS) - 0.5) {
-    col = vec3(0.015) + 0.008 * rd;
+    col = vec3(0.015) + 0.008 * normalize(ray);
   } else {
-    vec3 p = ro + rd * t;
+    vec3 p = ro + ray * t;
     vec3 n = normal(p);
-    float ao   = 1.0 - steps / float(MAX_STEPS);
-    float fres = pow(clamp(1.0 - abs(dot(n, -rd)), 0.0, 1.0), 2.0);
-    vec3 base  = (cos(p * 0.5) + 2.0) / 3.0;
+    float ao = 1.0 - steps / float(MAX_STEPS);
+    float fres = pow(clamp(1.0 - abs(dot(n, -ray)), 0.0, 1.0), 2.0);
+    vec3 base = (cos(p * 0.5) + 2.0) / 3.0;
     col = base * (ao * 0.75 + fres * 0.6) + 0.03;
   }
 
@@ -178,22 +197,21 @@ void main() {
 }
 `;
 
-// --- compile & link ---
+// --- compile ---
 function makeShader(src, type) {
   const s = gl.createShader(type);
   gl.shaderSource(s, src);
   gl.compileShader(s);
   if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
-    console.error("Shader compile error:", gl.getShaderInfoLog(s));
+    console.error("Shader error:", gl.getShaderInfoLog(s));
     return null;
   }
   return s;
 }
-
 const vs = makeShader(VERT, gl.VERTEX_SHADER);
 const fs = makeShader(FRAG, gl.FRAGMENT_SHADER);
 if (!vs || !fs) {
-  document.body.innerHTML += '<div style="position:fixed;top:8px;left:8px;color:#f44;font:bold 14px monospace">SHADER ERROR — see console</div>';
+  document.body.innerHTML += '<div style="position:fixed;top:8px;left:8px;color:#f44;font:bold 14px monospace">SHADER ERROR — see F12 console</div>';
   throw "shader compile failed";
 }
 
@@ -222,21 +240,98 @@ gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
 // Uniforms
 const uT  = gl.getUniformLocation(prog, "T");
 const uR  = gl.getUniformLocation(prog, "R");
-const uYP = gl.getUniformLocation(prog, "YP");
+const uFwd= gl.getUniformLocation(prog, "EyeFwd");
+const uRgt= gl.getUniformLocation(prog, "EyeRight");
+const uUp = gl.getUniformLocation(prog, "EyeUp");
 const uCP = gl.getUniformLocation(prog, "CamPos");
 
-// --- render loop ---
-const t0 = performance.now();
-(function loop() {
-  const t = (performance.now() - t0) / 1000.0;
-  gl.uniform1f(uT,  t);
+// --- helpers ---
+function buildCamera(yw, pt) {
+  const cy = Math.cos(yw), sy = Math.sin(yw);
+  const cp = Math.cos(pt), sp = Math.sin(pt);
+  const fwd = [cp*sy, sp, cp*cy];
+  const len = Math.sqrt(fwd[0]*fwd[0] + fwd[1]*fwd[1] + fwd[2]*fwd[2]);
+  fwd[0]/=len; fwd[1]/=len; fwd[2]/=len;
+  const rgt = [cy, 0.0, -sy];
+  const u = [
+    rgt[1]*fwd[2] - rgt[2]*fwd[1],
+    rgt[2]*fwd[0] - rgt[0]*fwd[2],
+    rgt[0]*fwd[1] - rgt[1]*fwd[0]
+  ];
+  return {fwd, rgt, up: u};
+}
+
+// --- desktop render loop ---
+function renderDesktop(t) {
+  resize();
+  const cam = buildCamera(yaw, pitch);
+  gl.uniform1f(uT, t);
   gl.uniform2f(uR, canvas.width, canvas.height);
-  gl.uniform2f(uYP, yaw, pitch);
+  gl.uniform3fv(uFwd, cam.fwd);
+  gl.uniform3fv(uRgt, cam.rgt);
+  gl.uniform3fv(uUp, cam.up);
   gl.uniform3f(uCP, camX, camY, camZ);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
+}
+
+// --- XR render loop ---
+let xrFrame = null;
+function renderXR(time, frame) {
+  xrFrame = frame;
+  const session = frame.session;
+  const pose = frame.getViewerPose(xrRefSpace);
+  if (!pose) {
+    session.requestAnimationFrame(renderXR);
+    return;
+  }
+
+  const layer = session.renderState.baseLayer;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
+
+  for (const view of pose.views) {
+    const raw = view.viewport;
+    let vp;
+    if (raw && raw.width > 0 && raw.height > 0) {
+      vp = raw;
+    } else {
+      // Fallback: split framebuffer horizontally for stereo
+      const fbW = canvas.width;
+      const fbH = canvas.height;
+      vp = { x: view.eye === "left" ? 0 : (fbW >> 1), y: 0, width: fbW >> 1, height: fbH };
+    }
+    gl.viewport(vp.x, vp.y, vp.width, vp.height);
+    // Extract camera axes from XR view matrix
+    const m = view.transform.matrix;
+    // Column-major 4x4; first 9 floats are right(x), up(y), forward(-z) * maybe -z
+    const right = [m[0], m[1], m[2]];
+    const up    = [m[4], m[5], m[6]];
+    // Camera local -Z = forward; note sign depends on convention
+    const fwd = [-m[8], -m[9], -m[10]];
+    const pos = [m[12], m[13], m[14]];
+
+    gl.uniform1f(uT, time / 1000.0);
+    gl.uniform2f(uR, vp.width, vp.height);
+    gl.uniform3fv(uFwd, fwd);
+    gl.uniform3fv(uRgt, right);
+    gl.uniform3fv(uUp, up);
+    gl.uniform3fv(uCP, pos);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+  }
+
+  session.requestAnimationFrame(renderXR);
+}
+
+// --- main entry ---
+const t0 = performance.now();
+(function loop(now) {
+  if (xrSession) {
+    // XR calls its own rAF via requestAnimationFrame inside renderXR
+    return;
+  }
+  const t = now - t0;
+  renderDesktop(t);
   requestAnimationFrame(loop);
-})();
+})(performance.now());
 </script>
 </body>
 </html>
-
