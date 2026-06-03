@@ -291,13 +291,15 @@ function renderXR(time, frame) {
   for (const view of pose.views) {
     const raw = view.viewport;
     let vp;
-    if (raw && raw.width > 0 && raw.height > 0) {
+    if (raw && raw.x !== undefined && raw.width > 0 && raw.height > 0) {
       vp = raw;
     } else {
-      // Fallback: split framebuffer horizontally for stereo
-      const fbW = canvas.width;
-      const fbH = canvas.height;
-      vp = { x: view.eye === "left" ? 0 : (fbW >> 1), y: 0, width: fbW >> 1, height: fbH };
+      // Fallback: side-by-side stereo using real framebuffer dims
+      const fbW = layer.framebufferWidth;
+      const fbH = layer.framebufferHeight;
+      const half = fbW >> 1;
+      const eye = view.eye || (view.viewIndex === 0 ? "left" : "right");
+      vp = { x: eye === "left" ? 0 : half, y: 0, width: half, height: fbH };
     }
     gl.viewport(vp.x, vp.y, vp.width, vp.height);
     // Extract camera axes from XR view matrix
