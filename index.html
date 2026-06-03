@@ -302,14 +302,24 @@ function renderXR(time, frame) {
       vp = { x: eye === "left" ? 0 : half, y: 0, width: half, height: fbH };
     }
     gl.viewport(vp.x, vp.y, vp.width, vp.height);
-    // Extract camera axes from XR view matrix
-    const m = view.transform.matrix;
-    // Column-major 4x4; first 9 floats are right(x), up(y), forward(-z) * maybe -z
-    const right = [m[0], m[1], m[2]];
-    const up    = [m[4], m[5], m[6]];
-    // Camera local -Z = forward; note sign depends on convention
-    const fwd = [-m[8], -m[9], -m[10]];
-    const pos = [m[12], m[13], m[14]];
+    // Use XRRigidTransform position/quaternion directly — no matrix-index guesswork
+    const ep = view.transform.position;
+    const o  = view.transform.orientation;
+    const q = [o.x, o.y, o.z, o.w];
+
+    // rotate vector v by quaternion q: v' = v + 2*cross(q_xyz, cross(q_xyz, v) + q_w*v)
+    const cross3 = (a,b) => [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+    const rotByQ = (q, v) => {
+      const t = cross3([q[0], q[1], q[2]], v);
+      const u = [t[0]+q[3]*v[0], t[1]+q[3]*v[1], t[2]+q[3]*v[2]];
+      const w = cross3([q[0], q[1], q[2]], u);
+      return [v[0]+2*w[0], v[1]+2*w[1], v[2]+2*w[2]];
+    };
+
+    const fwd = rotByQ(q, [0, 0, -1]);
+    const rgt = rotByQ(q, [1, 0, 0]);
+    const up  = rotByQ(q, [0, 1, 0]);
+    const pos = [ep.x, ep.y, ep.z];
 
     gl.uniform1f(uT, time / 1000.0);
     gl.uniform2f(uR, vp.width, vp.height);
