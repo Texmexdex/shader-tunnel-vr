@@ -324,7 +324,7 @@ function renderXR(time, frame) {
     gl.uniform1f(uT, time / 1000.0);
     gl.uniform2f(uR, vp.width, vp.height);
     gl.uniform3fv(uFwd, fwd);
-    gl.uniform3fv(uRgt, right);
+    gl.uniform3fv(uRgt, rgt);
     gl.uniform3fv(uUp, up);
     gl.uniform3fv(uCP, pos);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
