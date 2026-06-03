@@ -2,185 +2,191 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>XR Stereo Test</title>
-<style>
-  html,body{margin:0;padding:0;overflow:hidden;background:#000}
-  #c{display:block;width:100vw;height:100vh}
-  #vr{position:fixed;top:12px;right:12px;padding:10px 14px;background:#fff;color:#000;border:none;border-radius:4px;cursor:pointer;font-weight:600;display:none}
-</style>
+<title>Recursive Cube Tunnel</title>
+<style>html,body{margin:0;padding:0;overflow:hidden;background:#000}canvas{display:block;width:100vw;height:100vh;cursor:crosshair</style>
 </head>
 <body>
 <canvas id="c"></canvas>
-<button id="vr">ENTER VR</button>
 <script>
 "use strict";
-const canvas = document.getElementById("c");
-const gl = canvas.getContext("webgl", {antialias:false, alpha:false});
+const c = document.getElementById("c");
+const gl = c.getContext("webgl", {antialias:false, alpha:false}) || c.getContext("experimental-webgl");
 if (!gl) { document.body.innerHTML = '<div style="color:#fff;padding:40px">No WebGL</div>'; throw "no gl"; }
 
-let xrSession = null, xrRefSpace = null;
-const vrBtn = document.getElementById("vr");
-
-if (navigator.xr) {
-  navigator.xr.isSessionSupported("immersive-vr").then(ok => {
-    if (ok) vrBtn.style.display = "block";
-  });
-}
-
-vrBtn.addEventListener("click", async () => {
-  try {
-    xrSession = await navigator.xr.requestSession("immersive-vr", {
-      optionalFeatures: ["local-floor"]
-    });
-    vrBtn.textContent = "LEAVE VR";
-    vrBtn.style.background = "#f44";
-    vrBtn.style.color = "#fff";
-    xrSession.addEventListener("end", () => {
-      xrSession = null; xrRefSpace = null;
-      vrBtn.textContent = "ENTER VR";
-      vrBtn.style.background = "#fff";
-      vrBtn.style.color = "#000";
-      onResize();
-    });
-    await gl.makeXRCompatible();
-    xrRefSpace = await xrSession.requestReferenceSpace("local-floor");
-    const layer = new XRWebGLLayer(xrSession, gl);
-    xrSession.updateRenderState({baseLayer: layer});
-    xrSession.requestAnimationFrame(onXRFrame);
-  } catch (err) {
-    alert("XR error: " + err.message);
-  }
+let yaw=0, pitch=0, drag=false, lx=0, ly=0;
+c.addEventListener("mousedown", e=>{drag=true; lx=e.clientX; ly=e.clientY;});
+addEventListener("mouseup", ()=>drag=false);
+addEventListener("mousemove", e=>{
+  if(!drag) return;
+  yaw  -= (e.clientX-lx)*0.004;
+  pitch -= (e.clientY-ly)*0.004;
+  pitch = Math.max(-1.3, Math.min(1.3, pitch));
+  lx=e.clientX; ly=e.clientY;
 });
 
-function onResize() {
-  if (xrSession) return;
-  canvas.width = innerWidth;
-  canvas.height = innerHeight;
-  gl.viewport(0, 0, canvas.width, canvas.height);
+function resize(){
+  const d = Math.min(devicePixelRatio||1, 1.5);
+  c.width = innerWidth*d; c.height = innerHeight*d;
+  gl.viewport(0,0,c.width,c.height);
 }
-addEventListener("resize", onResize);
-onResize();
+addEventListener("resize", resize); resize();
 
-const VERT = `attribute vec2 a_pos;
-void main(){gl_Position=vec4(a_pos,0.,1.);}`;
+const vs = `attribute vec2 a_pos; void main(){gl_Position=vec4(a_pos,0.,1.);}`;
 
-const FRAG = `
-precision mediump float;
+const fs = `
+precision highp float;
+uniform float T;
 uniform vec2  R;
-uniform vec2  EyeSide; // x=0 for left, x=1 for right
+uniform vec2  YP;
 
-void main() {
-  vec2 uv = gl_FragCoord.xy - 0.5;
+#define DEPTH 10
+#define PI acos(-1.)
 
-  // Red for left eye, blue for right eye, solid fill — no camera math
-  vec3 col = mix(vec3(1.0, 0.1, 0.1), vec3(0.1, 0.1, 1.0), EyeSide.x);
+vec4 hash4(int n){
+  return fract(sin(vec4(532.894,392.843,402.942,837.098)*float(n+1))*4444.5);
+}
 
-  // Add a white center line so it's obvious the two halves are distinct
-  float halfW = R.x * 0.5;
-  float d = abs(uv.x - halfW);
-  float mid = 1.0 - smoothstep(0.0, 2.0, d);
-  col = mix(col, vec3(1.0), mid);
+void qrot(inout vec3 v, in vec4 q){
+  v += 2.0*cross(cross(v, q.xyz) + q.w*v, q.xyz);
+}
 
-  gl_FragColor = vec4(col, 1.0);
+vec3 cubeRayHit(in float r, in vec4 q, in vec3 c, in vec3 ori, in vec3 rd){
+  ori -= c;
+  qrot(ori, q);
+  qrot(rd, q);
+  vec3 h0 = -(ori + sign(rd)*r) / rd;
+  vec3 h1 = -(ori - sign(rd)*r) / rd;
+  float t0 = max(h0.x, max(h0.y, h0.z));
+  float t1 = min(h1.x, min(h1.y, h1.z));
+  if(t1 < t0) return vec3(-1.0);
+  if(t0 < 1e-9) return vec3(-1.0);
+  float u = 1.0;
+  if(h0.y > h0.x) u = 2.0;
+  if(h0.z > max(h0.x, h0.y)) u = 3.0;
+  vec3 hp = abs(ori + rd*t0);
+  float d = r - min(max(hp.x, hp.y), min(max(hp.y, hp.z), max(hp.z, hp.x)));
+  return vec3(t0, u, d);
+}
+
+vec3 osc(in vec3 u){
+  u = mod(u, 1.0)*4.0;
+  return abs(u-2.0)-1.0;
+}
+
+// XOR replacement for WebGL1 (bitwise ^ not available)
+int xorIdx(int a, int b){
+  // b is 1, 2, or 3
+  if(b == 1) return (a == 0) ? 1 : (a == 1) ? 0 : (a == 2) ? 3 : 2;
+  if(b == 2) return (a == 0) ? 2 : (a == 1) ? 3 : (a == 2) ? 0 : 1;
+  return     (a == 0) ? 3 : (a == 1) ? 2 : (a == 2) ? 1 : 0;
+}
+
+// lookup helpers for mat4 columns (no dynamic indexing in WebGL1)
+vec4 getBack(int idx, float col){
+  if(idx==1) return vec4(col,0.,0.,1.);
+  if(idx==2) return vec4(0.,col,0.,1.);
+  if(idx==3) return vec4(0.,0.,col,1.);
+  return vec4(0.,0.,0.,1.);
+}
+vec4 getEdge(int idx){
+  if(idx==1) return vec4(1.,0.,0.,1.);
+  if(idx==2) return vec4(0.,1.,0.,1.);
+  if(idx==3) return vec4(0.,0.,1.,1.);
+  return vec4(1.,1.,1.,1.);
+}
+
+void getColor(out vec4 fragColor, in vec3 pos, in vec3 ray){
+  int idx = 0;
+  int ri = 0;
+
+  for(int d=0; d<DEPTH; d++){
+    float col = 0.2;
+
+    float t = T*0.2;
+    vec4 u = normalize(hash4(ri));
+    vec4 v = vec4(hash4(ri+1));
+    v = normalize(v - dot(v,u)*u);
+    vec4 q = cos(t)*u + sin(t)*v;
+    float r = pow(0.5, float(d))*0.5;
+    vec3 c = (0.5-r)*osc(t + hash4(ri+2).xyz)*0.3;
+
+    vec3 hit = cubeRayHit(r, q, c, pos, ray);
+    int face = int(hit.y + 0.5);
+
+    if(hit.y < -0.5){
+      fragColor = getBack(idx, col);
+      break;
+    }
+    if(hit.z < 0.02*r){
+      idx = xorIdx(idx, face);
+      fragColor = getEdge(idx);
+      break;
+    } else if(d == DEPTH-1){
+      idx = xorIdx(idx, face);
+      fragColor = getBack(idx, col);
+    } else {
+      idx = xorIdx(idx, face);
+      ri = ri*3 + face;
+    }
+  }
+}
+
+void main(){
+  vec2 uv = (2.0*gl_FragCoord.xy - R) / R.y;
+
+  vec3 pos = vec3(0.0, 0.0, 3.0);
+  vec3 eye = -normalize(pos);
+  vec3 up = vec3(0.0, 1.0, 0.0);
+  up -= dot(up, eye)*eye;
+  up = normalize(up);
+  vec3 right = cross(eye, up);
+  float angle = 0.3;
+
+  float cy = cos(YP.x), sy = sin(YP.x);
+  float cp = cos(YP.y), sp = sin(YP.y);
+  right = normalize(right*cy + cross(right, eye)*sy);
+  up = normalize(up + vec3(0.0, sp, 0.0)*length(up));
+  up = normalize(cross(right, eye));
+
+  vec3 ray = eye + (uv.x*right + uv.y*up)*angle;
+  ray = normalize(ray);
+
+  vec4 col;
+  getColor(col, pos, ray);
+  gl_FragColor = col;
 }
 `;
 
-function makeShader(src, type) {
-  const s = gl.createShader(type);
-  gl.shaderSource(s, src);
-  gl.compileShader(s);
-  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
-    console.error("Shader error:", gl.getShaderInfoLog(s));
-    return null;
-  }
-  return s;
+function mks(s, tp){
+  const sh=gl.createShader(tp); gl.shaderSource(sh,s); gl.compileShader(sh);
+  if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS)){console.error(gl.getShaderInfoLog(sh)); return null;}
+  return sh;
 }
+const vs2=mks(vs,gl.VERTEX_SHADER);
+const fs2=mks(fs,gl.FRAGMENT_SHADER);
+if(!vs2||!fs2){document.body.innerHTML+='<div style="position:fixed;top:8px;left:8px;color:#f44;font:bold 14px monospace">Shader error — see F12 console</div>'; throw "shader";}
 
-const vs = makeShader(VERT, gl.VERTEX_SHADER);
-const fs = makeShader(FRAG, gl.FRAGMENT_SHADER);
-if (!vs || !fs) {
-  document.body.innerHTML += '<div style="position:fixed;top:8px;left:8px;color:#f44;font:bold 14px monospace">SHADER ERROR — see console</div>';
-  throw "shader";
-}
+const pg=gl.createProgram(); gl.attachShader(pg,vs2); gl.attachShader(pg,fs2); gl.linkProgram(pg);
+if(!gl.getProgramParameter(pg,gl.LINK_STATUS)){console.error(gl.getProgramInfoLog(pg)); throw "link";}
+gl.useProgram(pg);
 
-const prog = gl.createProgram();
-gl.attachShader(prog, vs);
-gl.attachShader(prog, fs);
-gl.linkProgram(prog);
-if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-  console.error("Link error:", gl.getProgramInfoLog(prog));
-  throw "link";
-}
-gl.useProgram(prog);
+const buf=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]), gl.STATIC_DRAW);
+const aP=gl.getAttribLocation(pg,"a_pos"); gl.enableVertexAttribArray(aP); gl.vertexAttribPointer(aP,2,gl.FLOAT,false,0,0);
 
-const buf = gl.createBuffer();
-gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
-  -1, -1,   1, -1,  -1,  1,
-  -1,  1,   1, -1,   1,  1
-]), gl.STATIC_DRAW);
-const aP = gl.getAttribLocation(prog, "a_pos");
-gl.enableVertexAttribArray(aP);
-gl.vertexAttribPointer(aP, 2, gl.FLOAT, false, 0, 0);
+const uT=gl.getUniformLocation(pg,"T");
+const uR=gl.getUniformLocation(pg,"R");
+const uY=gl.getUniformLocation(pg,"YP");
 
-const uR  = gl.getUniformLocation(prog, "R");
-const uEye= gl.getUniformLocation(prog, "EyeSide");
-
-// Desktop loop: flat fullscreen, red = one-eyed
-(function loop() {
-  if (xrSession) return;
-  gl.viewport(0, 0, canvas.width, canvas.height);
-  gl.uniform2f(uR, canvas.width, canvas.height);
-  gl.uniform2f(uEye, 0.0, 0.0);
-  gl.drawArrays(gl.TRIANGLES, 0, 6);
-  requestAnimationFrame(loop);
+const t0=performance.now();
+(function f(){
+  const t=(performance.now()-t0)/1000;
+  gl.uniform1f(uT,t);
+  gl.uniform2f(uR,c.width,c.height);
+  gl.uniform2f(uY,yaw,pitch);
+  gl.drawArrays(gl.TRIANGLES,0,6);
+  requestAnimationFrame(f);
 })();
-
-function drawEye(raw, layer, eye, time, xrFrame, pose, view){
-  let vp;
-  if (raw && raw.width > 0 && raw.height > 0){
-    vp = raw;
-  } else {
-    const fbW = layer.framebufferWidth;
-    const fbH = layer.framebufferHeight;
-    const x = eye ? (fbW >> 1) : 0;
-    vp = {x, y:0, width:(fbW>>1), height:fbH};
-  }
-  gl.viewport(vp.x, vp.y, vp.width, vp.height);
-  // placeholder
-  gl.uniform2f(uR, vp.width, vp.height);
-  gl.uniform4f(uEye, eye?1:0,0, vp.width, vp.height);
-  gl.drawArrays(gl.TRIANGLES, 0, 6);
-}
-
-function onXRFrame(time, xrFrame){
-  const pose = xrFrame.getViewerPose(xrRefSpace);
-  if (!pose){
-    xrSession.requestAnimationFrame(onXRFrame);
-    return;
-  }
-  const layer = xrSession.renderState.baseLayer;
-  gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
-  const views = pose.views;
-  const raw0 = views[0].viewport;
-  const raw1 = views[1].viewport;
-  // detect Quest mode: only view 0 has a real viewport, view 1 is empty
-  const questMode = !raw1 || raw1.width <= 0;
-  if (questMode){
-    // draw two eyes by manually splitting framebuffer and using *same* view for both
-    const fbW = layer.framebufferWidth || canvas.width;
-    const fbH = layer.framebufferHeight || canvas.height;
-    const half = fbW >> 1;
-    const vpLeft  = {x:0, y:0, width:half, height:fbH};
-    const vpRight = {x:half, y:0, width:half, height:fbH};
-    drawEye(vpLeft,  layer, false, time, xrFrame, pose, views[0]);
-    drawEye(vpRight, layer, true,  time, xrFrame, pose, views[0]);
-  } else {
-    drawEye(raw0, layer, false, time, xrFrame, pose, views[0]);
-    drawEye(raw1, layer, true,  time, xrFrame, pose, views[1]);
-  }
-  xrSession.requestAnimationFrame(onXRFrame);
-}
 </script>
 </body>
 </html>
