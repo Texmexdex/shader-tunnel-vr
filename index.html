@@ -186,36 +186,24 @@ const uCP = gl.getUniformLocation(prog, "EyePos");
 //   eye-relative up          = local +Y rotated by q
 // head position comes straight from the XR viewer pose.
 function qrot(q, v){
-  const t = [
-    q[1]*v[2] - q[2]*v[1],
-    q[2]*v[0] - q[0]*v[2],
-    q[0]*v[1] - q[1]*v[0]
-  ];
+  // rotate vector v by unit quaternion q=[x,y,z,w]
+  const t = [q[1]*v[2]-q[2]*v[1], q[2]*v[0]-q[0]*v[2], q[0]*v[1]-q[1]*v[0]];
   const u = [t[0]+q[3]*v[0], t[1]+q[3]*v[1], t[2]+q[3]*v[2]];
-  const w = [
-    q[1]*u[2] - q[2]*u[1],
-    q[2]*u[0] - q[0]*u[2],
-    q[0]*u[1] - q[1]*u[0]
-  ];
+  const w = [q[1]*u[2]-q[2]*u[1], q[2]*u[0]-q[0]*u[2], q[0]*u[1]-q[1]*u[0]];
   return [v[0]+2*w[0], v[1]+2*w[1], v[2]+2*w[2]];
 }
 
-function drawEye(pose, frustum){
+function drawEye(view, frustum){
   if (!frustum || frustum.width <= 0) return;
   gl.viewport(frustum.x, frustum.y, frustum.width, frustum.height);
 
-  const m = pose.transform.matrix;
-  const q = [m[6], m[7], m[8], m[11]]; // w component around opposite corner
-  const eye = [
-    m[0] * q[3]*2 + q[0]*q[0]*2 - 1,
-    m[1] * q[3]*2 + q[1]*q[1]*2 - 1,
-    m[2] * q[3]*2 + q[2]*q[2]*2 - 1
-  ];
-  // simplified basis from matrix directly (no quaternion)
-  const fwd = [-m[8], -m[9], -m[10]];
-  const rgt = [ m[0],  m[1],  m[2]];
-  const up  = [ m[4],  m[5],  m[6]];
-  const pos = [m[12], m[13], m[14]];
+  // Build camera basis from headset pose only
+  const ori = view.transform.orientation;
+  const q = [ori.x, ori.y, ori.z, ori.w];
+  const fwd = qrot(q, [0, 0,-1]);
+  const rgt = qrot(q, [1, 0, 0]);
+  const up  = qrot(q, [0, 1, 0]);
+  const pos = [view.transform.position.x, view.transform.position.y, view.transform.position.z];
 
   gl.uniform1f(uT, performance.now()/1000);
   gl.uniform2f(uR, frustum.width, frustum.height);
