@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Truchet Tunnel 3D</title>
+<style>
+  html,body{margin:0;padding:0;overflow:hidden;background:#000;font-family:system-ui,sans-serif}
+  canvas{display:block;width:100vw;height:100vh;cursor:crosshair}
+  #info{position:fixed;bottom:12px;left:50%;transform:translateX(-50%);color:#666;font-size:13px;pointer-events:none;text-align:center;opacity:0.8}
+  #fps{position:fixed;top:8px;left:10px;color:#444;font-size:11px;pointer-events:none;font-family:monospace}
+</style>
+</head>
+<body>
+<canvas id=c></canvas>
+<div id=info>Drag to look around &middot; Scroll to move forward/back &middot; Press F for fullscreen</div>
+<div id=fps></div>
+
+<script>
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl', {antialias: false, alpha: false})
+       || canvas.getContext('experimental-webgl');
+
+if (!gl) {
+  document.body.innerHTML = '<div style="color:#fff;padding:40px;text-align:center">WebGL not supported in this browser.</div>';
+  throw new Error('No WebGL');
+}
+
+// --- Camera state ---
+let yaw = 0.0;
+let pitch = 0.0;
+let camZ = 0.0;       // forward position along tunnel (Z axis)
+let dragging = false;
+let lastX = 0, lastY = 0;
+
+canvas.addEventListener('mousedown', e => { dragging = true; lastX = e.clientX; lastY = e.clientY; });
+window.addEventListener('mouseup', () => dragging = false);
+window.addEventListener('mousemove', e => {
+  if (!dragging) return;
+  const dx = e.clientX - lastX;
+  const dy = e.clientY - lastY;
+  yaw   -= dx * 0.005;
+  pitch -= dy * 0.005;
+  pitch = Math.max(-1.5, Math.min(1.5, pitch));
+  lastX = e.clientX;
+  lastY = e.clientY;
+});
+
+canvas.addEventListener('wheel', e => {
+  camZ += e.deltaY * 0.02;
+  e.preventDefault();
+}, {passive: true});
+
+window.addEventListener('keydown', e => {
+  if (e.key === 'f' || e.key === 'F') {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else document.body.requestFullscreen().catch(()=>{});
+  }
+});
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2); // cap for perf
+  canvas.width  = Math.floor(window.innerWidth  * dpr);
+  canvas.height = Math.floor(window.innerHeight * dpr);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+}
+window.addEventListener('resize', resize);
+resize();
+
+// --- Shader sources ---
+const vertSrc = `
+attribute vec2 a_pos;
+void main() {
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+}`;
+
+const fragSrc = `
+precision highp float;
+
+uniform float iTime;
+uniform vec2  iResolution;
+uniform vec2  uYawPitch;
+uniform float uCamZ;
+
+float rand(vec3 r) {
+  return fract(sin(dot(r.xy, vec2(1.38984*sin(r.z), 1.13233*cos(r.z)))) * 653758.5453);
+}
+
+#define Iterations 64
+#define Thickness 0.1
+#define SuperQuadPower 8.0
+
+float truchetarc(vec3 pos) {
+  float r = length(pos.xy);
+  return pow(pow(abs(r - 0.5), SuperQuadPower) + pow(abs(pos.z - 0.5), SuperQuadPower), 1.0/SuperQuadPower) - Thickness;
+}
+
+float truchetcell(vec3 pos) {
+  return min(min(
+    truchetarc(pos),
+    truchetarc(vec3(pos.z, 1.0-pos.x, pos.y))
+  ), truchetarc(vec3(1.0-pos.y, 1.0-pos.z, pos.x)));
+}
+
+float distfunc(vec3 pos) {
+  vec3 cellpos = fract(pos);
+  vec3 gridpos = floor(pos);
+  float rnd = rand(gridpos);
+  if      (rnd < 1.0/8.0) return truchetcell(vec3(cellpos.x, cellpos.y, cellpos.z));
+  else if (rnd < 2.0/8.0) return truchetcell(vec3(cellpos.x, 1.0-cellpos.y, cellpos.z));
+  else if (rnd < 3.0/8.0) return truchetcell(vec3(1.0-cellpos.x, cellpos.y, cellpos.z));
+  else if (rnd < 4.0/8.0) return truchetcell(vec3(1.0-cellpos.x, 1.0-cellpos.y, cellpos.z));
+  else if (rnd < 5.0/8.0) return truchetcell(vec3(cellpos.y, cellpos.x, 1.0-cellpos.z));
+  else if (rnd < 6.0/8.0) return truchetcell(vec3(cellpos.y, 1.0-cellpos.x, 1.0-cellpos.z));
+  else if (rnd < 7.0/8.0) return truchetcell(vec3(1.0-cellpos.y, cellpos.x, 1.0-cellpos.z));
+  else                      return truchetcell(vec3(1.0-cellpos.y, 1.0-cellpos.x, 1.0-cellpos.z));
+}
+
+vec3 gradient(vec3 pos) {
+  const float eps = 0.0001;
+  float mid = distfunc(pos);
+  return vec3(
+    distfunc(pos + vec3(eps, 0.0, 0.0)) - mid,
+    distfunc(pos + vec3(0.0, eps, 0.0)) - mid,
+    distfunc(pos + vec3(0.0, 0.0, eps)) - mid
+  );
+}
+
+void main() {
+  // Reconstruct normalized coords like mainImage did
+  vec2 coord = (2.0 * gl_FragCoord.xy - iResolution.xy) / length(iResolution.xy);
+
+  // Build camera orientation from yaw/pitch
+  float cy = cos(uYawPitch.x), sy = sin(uYawPitch.x);
+  float cp = cos(uYawPitch.y), sp = sin(uYawPitch.y);
+  vec3 forward = vec3(cp*sy, sp, cp*cy);
+  vec3 right   = vec3(cy, 0.0, -sy);
+  vec3 up      = cross(right, forward);
+
+  vec3 rd = normalize(forward + coord.x * right + coord.y * up);
+  vec3 ro = vec3(0.0, 0.0, uCamZ);
+
+  // Sphere trace (fixed: step forward only)
+  float t = 0.0;
+  float i = float(Iterations);
+  for (int j = 0; j < Iterations; j++) {
+    vec3 p = ro + rd * t;
+    float d = distfunc(p);
+    if (abs(d) < 0.001) { i = float(j); break; }
+    t += max(d, 0.001);      // <-- SPRITE TRACE FIX: never step backward
+    if (t > 60.0) break;
+  }
+
+  vec3 p = ro + rd * t;
+  vec3 normal = normalize(gradient(p));
+  float ao = 1.0 - i / float(Iterations);
+  float fresnel = pow(max(0.0, dot(normal, -rd)), 2.0);
+  float light = ao * fresnel * 1.4;
+
+  float z = p.z / 2.0;
+  vec3 col = (cos(p / 2.0) + 2.0) / 3.0;
+
+  // No env map in standalone version — pure procedural
+  fragColor = vec4(col * light + 0.05, 1.0);
+}
+`;
+
+// --- Compile helper ---
+function makeShader(src, type) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    const info = gl.getShaderInfoLog(s);
+    gl.deleteShader(s);
+    throw new Error('Shader compile error: ' + info);
+  }
+  return s;
+}
+
+const vs = makeShader(vertSrc, gl.VERTEX_SHADER);
+const fs = makeShader(fragSrc, gl.FRAGMENT_SHADER);
+
+const prog = gl.createProgram();
+gl.attachShader(prog, vs);
+gl.attachShader(prog, fs);
+gl.linkProgram(prog);
+
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+  throw new Error('Program link error: ' + gl.getProgramInfoLog(prog));
+}
+
+gl.useProgram(prog);
+
+// Fullscreen quad
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+  -1, -1,  1, -1, -1,  1,
+  -1,  1,  1, -1,  1,  1,
+]), gl.STATIC_DRAW);
+
+const aPos = gl.getAttribLocation(prog, 'a_pos');
+gl.enableVertexAttribArray(aPos);
+gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+// Uniforms
+const uTime      = gl.getUniformLocation(prog, 'iTime');
+const uRes       = gl.getUniformLocation(prog, 'iResolution');
+const uYawPitch  = gl.getUniformLocation(prog, 'uYawPitch');
+const uCamZ      = gl.getUniformLocation(prog, 'uCamZ');
+
+// --- Render loop ---
+const start = performance.now();
+let lastFrame = start;
+let frames = 0;
+let fpsTime = start;
+const fpsEl = document.getElementById('fps');
+
+function frame() {
+  const now = performance.now();
+  const t = (now - start) / 1000.0;
+
+  // FPS counter
+  frames++;
+  if (now - fpsTime > 500) {
+    fpsEl.textContent = Math.round(frames / ((now - fpsTime) / 1000)) + ' fps';
+    frames = 0;
+    fpsTime = now;
+  }
+
+  resize(); // handle live resize
+
+  gl.uniform1f(uTime, t);
+  gl.uniform2f(uRes, canvas.width, canvas.height);
+  gl.uniform2f(uYawPitch, yaw, pitch);
+  gl.uniform1f(uCamZ, camZ);
+
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+  requestAnimationFrame(frame);
+}
+
+frame();
+</script>
+</body>
+</html>
