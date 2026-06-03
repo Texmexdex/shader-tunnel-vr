@@ -136,33 +136,49 @@ const uEye= gl.getUniformLocation(prog, "EyeSide");
   requestAnimationFrame(loop);
 })();
 
-function onXRFrame(time, xrFrame) {
+function drawEye(raw, layer, eye, time, xrFrame, pose, view){
+  let vp;
+  if (raw && raw.width > 0 && raw.height > 0){
+    vp = raw;
+  } else {
+    const fbW = layer.framebufferWidth;
+    const fbH = layer.framebufferHeight;
+    const x = eye ? (fbW >> 1) : 0;
+    vp = {x, y:0, width:(fbW>>1), height:fbH};
+  }
+  gl.viewport(vp.x, vp.y, vp.width, vp.height);
+  // placeholder
+  gl.uniform2f(uR, vp.width, vp.height);
+  gl.uniform4f(uEye, eye?1:0,0, vp.width, vp.height);
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+}
+
+function onXRFrame(time, xrFrame){
   const pose = xrFrame.getViewerPose(xrRefSpace);
-  if (!pose) {
+  if (!pose){
     xrSession.requestAnimationFrame(onXRFrame);
     return;
   }
-
   const layer = xrSession.renderState.baseLayer;
   gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
-
-  for (const view of pose.views) {
-    const vp = view.viewport;
-    if (vp && vp.width > 0 && vp.height > 0) {
-      gl.viewport(vp.x, vp.y, vp.width, vp.height);
-    } else {
-      // fallback: split framebuffer horizontally
-      const half = layer.framebufferWidth >> 1;
-      const eye = (view.viewIndex === 0) ? 0 : 1;
-      gl.viewport(eye === 0 ? 0 : half, 0, half, layer.framebufferHeight);
-    }
-
-    const isRight = (view.eye === "right") ? 1.0 : 0.0;
-    gl.uniform2f(uR, canvas.width, canvas.height);
-    gl.uniform2f(uEye, isRight, 0.0);
-    gl.drawArrays(gl.TRIANGLES, 0, 6);
+  const views = pose.views;
+  const raw0 = views[0].viewport;
+  const raw1 = views[1].viewport;
+  // detect Quest mode: only view 0 has a real viewport, view 1 is empty
+  const questMode = !raw1 || raw1.width <= 0;
+  if (questMode){
+    // draw two eyes by manually splitting framebuffer and using *same* view for both
+    const fbW = layer.framebufferWidth || canvas.width;
+    const fbH = layer.framebufferHeight || canvas.height;
+    const half = fbW >> 1;
+    const vpLeft  = {x:0, y:0, width:half, height:fbH};
+    const vpRight = {x:half, y:0, width:half, height:fbH};
+    drawEye(vpLeft,  layer, false, time, xrFrame, pose, views[0]);
+    drawEye(vpRight, layer, true,  time, xrFrame, pose, views[0]);
+  } else {
+    drawEye(raw0, layer, false, time, xrFrame, pose, views[0]);
+    drawEye(raw1, layer, true,  time, xrFrame, pose, views[1]);
   }
-
   xrSession.requestAnimationFrame(onXRFrame);
 }
 </script>
