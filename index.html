@@ -2,336 +2,264 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Truchet Tunnel — XR</title>
+<title>XR Tunnel — minimal VR</title>
 <style>
   html,body{margin:0;padding:0;overflow:hidden;background:#000;font-family:system-ui,sans-serif}
-  canvas{display:block;width:100vw;height:100vh;cursor:crosshair}
+  #c{display:block;width:100vw;height:100vh}
+  #vr{position:fixed;top:12px;right:12px;padding:8px 12px;background:#fff;color:#000;border:none;border-radius:4px;cursor:pointer;font-weight:600;display:none}
   #info{position:fixed;bottom:12px;left:0;right:0;color:#777;font-size:13px;pointer-events:none;text-align:center}
-  #vr{position:fixed;top:12px;right:12px;padding:8px 12px;background:#fff;color:#000;border:none;cursor:pointer;border-radius:4px;font-weight:600;display:none}
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 <button id="vr">ENTER VR</button>
-<div id="info">drag=look &middot; scroll=move &middot; F=fullscreen</div>
+<div id="info">drag=look &middot; F=fullscreen &middot; ears=eyes</div>
 <script>
 "use strict";
 const canvas = document.getElementById("c");
-const gl = canvas.getContext("webgl", {antialias:false, alpha:false})
-       || canvas.getContext("experimental-webgl");
+const gl = canvas.getContext("webgl", {antialias:false, alpha:false});
 if (!gl) { document.body.innerHTML = '<div style="color:#fff;padding:40px">WebGL not supported.</div>'; throw "no gl"; }
 
-// --- state ---
-let yaw = 0.0, pitch = 0.0;
-let camX = 0.0, camY = 0.0, camZ = 0.0;
-let dragging = false, lastX = 0, lastY = 0;
-let xrSession = null;
-let xrRefSpace = null;
+let yaw = 0, pitch = 0, dragging = false, lx = 0, ly = 0;
+let session = null, refSpace = null;
 
-canvas.addEventListener("mousedown", e => { dragging = true; lastX = e.clientX; lastY = e.clientY; });
-window.addEventListener("mouseup", () => { dragging = false; });
+canvas.addEventListener("mousedown", e => { dragging = true; lx = e.clientX; ly = e.clientY; });
+window.addEventListener("mouseup", () => dragging = false);
 window.addEventListener("mousemove", e => {
   if (!dragging) return;
-  yaw   -= (e.clientX - lastX) * 0.005;
-  pitch -= (e.clientY - lastY) * 0.005;
+  yaw -= (e.clientX - lx) * 0.005;
+  pitch -= (e.clientY - ly) * 0.005;
   pitch = Math.max(-1.4, Math.min(1.4, pitch));
-  lastX = e.clientX; lastY = e.clientY;
+  lx = e.clientX; ly = e.clientY;
 });
-
-canvas.addEventListener("wheel", e => {
-  if (xrSession) return;
-  const cy = Math.cos(yaw), sy = Math.sin(yaw);
-  const cp = Math.cos(pitch), sp = Math.sin(pitch);
-  const fx = cp * sy, fy = sp, fz = cp * cy;
-  const amt = e.deltaY * 0.015;
-  camX += fx * amt; camY += fy * amt; camZ += fz * amt;
-  e.preventDefault();
-}, {passive: true});
-
 window.addEventListener("keydown", e => {
   if (e.key.toLowerCase() === "f") {
-    if (document.fullscreenElement) document.exitFullscreen();
-    else document.body.requestFullscreen().catch(()=>{});
+    document.fullscreenElement ? document.exitFullscreen() : document.body.requestFullscreen().catch(()=>{});
   }
 });
 
 function resize() {
-  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
-  canvas.width  = Math.floor(window.innerWidth  * dpr);
-  canvas.height = Math.floor(window.innerHeight * dpr);
+  canvas.width = innerWidth;
+  canvas.height = innerHeight;
   gl.viewport(0, 0, canvas.width, canvas.height);
 }
-window.addEventListener("resize", resize);
+addEventListener("resize", resize);
 resize();
 
-// --- XR ---
 const vrBtn = document.getElementById("vr");
 if (navigator.xr) {
-  navigator.xr.isSessionSupported("immersive-vr").then(ok => {
-    if (ok) vrBtn.style.display = "block";
-  });
+  navigator.xr.isSessionSupported("immersive-vr").then(ok => { if (ok) vrBtn.style.display = "block"; });
 }
-
 vrBtn.addEventListener("click", async () => {
   try {
-    const session = await navigator.xr.requestSession("immersive-vr", {
-      optionalFeatures: ["local-floor"]
-    });
-    xrSession = session;
+    session = await navigator.xr.requestSession("immersive-vr", {optionalFeatures:["local-floor"]});
     vrBtn.textContent = "LEAVE VR";
     vrBtn.style.background = "#f44"; vrBtn.style.color = "#fff";
-
     session.addEventListener("end", () => {
-      xrSession = null;
-      xrRefSpace = null;
-      vrBtn.textContent = "ENTER VR";
-      vrBtn.style.background = "#fff"; vrBtn.style.color = "#000";
+      session = null; refSpace = null;
+      vrBtn.textContent = "ENTER VR"; vrBtn.style.background = "#fff"; vrBtn.style.color = "#000";
       resize();
     });
-
     await gl.makeXRCompatible();
-    xrRefSpace = await session.requestReferenceSpace("local-floor");
-    const layer = new XRWebGLLayer(session, gl, {antialias:false});
+    refSpace = await session.requestReferenceSpace("local-floor");
+    const layer = new XRWebGLLayer(session, gl);
     session.updateRenderState({baseLayer: layer});
-    session.requestAnimationFrame(renderXR);
+    session.requestAnimationFrame(frame);
   } catch (err) {
-    console.error("XR error:", err);
-    alert("Could not start VR session.\n" + err.message);
+    alert("XR: " + err.message);
   }
 });
 
-// --- shaders ---
 const VERT = `attribute vec2 a_pos;
-void main() { gl_Position = vec4(a_pos, 0.0, 1.0); }`;
+void main(){gl_Position=vec4(a_pos,0.,1.);}`;
 
 const FRAG = `
 precision highp float;
-
 uniform float T;
 uniform vec2  R;
 uniform vec3  EyeFwd;
-uniform vec3  EyeRight;
-uniform vec3  EyeUp;
-uniform vec3  CamPos;
+uniform vec3  EyeR;
+uniform vec3  EyeU;
+uniform vec3  EyePos;
 
 #define MAX_STEPS 80
 #define MAX_DIST  40.0
-#define SURF_EPS  0.002
+#define SURF_EPS 0.002
 
-float hash(vec3 p) {
+float hash(vec3 p){
   p = fract(p * vec3(443.8975, 441.4236, 437.1954));
   p += dot(p, p.yzx + 19.19);
   return fract((p.x + p.y) * p.z);
 }
 
-float arc(vec3 pos) {
+float arc(vec3 pos){
   float r = length(pos.xy);
   float ax = pow(abs(r - 0.5), 8.0);
   float ay = pow(abs(pos.z - 0.5), 8.0);
   return pow(ax + ay, 0.125) - 0.08;
 }
 
-float cell(vec3 pos) {
-  return min(min(
-    arc(pos),
-    arc(vec3(pos.z, 1.0 - pos.x, pos.y))
-  ), arc(vec3(1.0 - pos.y, 1.0 - pos.z, pos.x)));
+float cell(vec3 pos){
+  return min(min(arc(pos), arc(vec3(pos.z, 1.0-pos.x, pos.y))), arc(vec3(1.0-pos.y, 1.0-pos.z, pos.x)));
 }
 
-float SDF(vec3 p) {
+float SDF(vec3 p){
   vec3 f = fract(p);
   vec3 g = floor(p);
   float rnd = hash(g);
   vec3 q;
   if      (rnd < 0.125) q = f;
-  else if (rnd < 0.250) q = vec3(f.x,       1.0 - f.y, f.z);
-  else if (rnd < 0.375) q = vec3(1.0 - f.x,  f.y,      f.z);
-  else if (rnd < 0.500) q = vec3(1.0 - f.x,  1.0 - f.y, f.z);
-  else if (rnd < 0.625) q = vec3(f.y,        f.x,      1.0 - f.z);
-  else if (rnd < 0.750) q = vec3(f.y,        1.0 - f.x, 1.0 - f.z);
-  else if (rnd < 0.875) q = vec3(1.0 - f.y,   f.x,      1.0 - f.z);
-  else                   q = vec3(1.0 - f.y,   1.0 - f.x, 1.0 - f.z);
+  else if (rnd < 0.250) q = vec3(f.x,       1.0-f.y, f.z);
+  else if (rnd < 0.375) q = vec3(1.0-f.x,   f.y,      f.z);
+  else if (rnd < 0.500) q = vec3(1.0-f.x,   1.0-f.y, f.z);
+  else if (rnd < 0.625) q = vec3(f.y,        f.x,      1.0-f.z);
+  else if (rnd < 0.750) q = vec3(f.y,        1.0-f.x, 1.0-f.z);
+  else if (rnd < 0.875) q = vec3(1.0-f.y,   f.x,      1.0-f.z);
+  else                   q = vec3(1.0-f.y,   1.0-f.x, 1.0-f.z);
   return cell(q);
 }
 
-vec3 normal(vec3 p) {
-  float e = 0.0005;
-  float h = SDF(p);
-  return normalize(vec3(
-    SDF(p + vec3(e, 0, 0)) - h,
-    SDF(p + vec3(0, e, 0)) - h,
-    SDF(p + vec3(0, 0, e)) - h
-  ));
+vec3 calcN(vec3 p){
+  float e = 0.0005; float h = SDF(p);
+  return normalize(vec3(SDF(p+vec3(e,0,0))-h, SDF(p+vec3(0,e,0))-h, SDF(p+vec3(0,0,e))-h));
 }
 
-void main() {
-  vec2 uv = (2.0 * gl_FragCoord.xy - R) / length(R);
-  vec3 ray = normalize(EyeFwd + uv.x * EyeRight + uv.y * EyeUp);
-  vec3 ro = CamPos + vec3(0.25, 0.25, 0.5);
+void main(){
+  vec2 uv = (2.0*gl_FragCoord.xy - R) / length(R);
+  vec3 ray = normalize(EyeFwd + uv.x*EyeR + uv.y*EyeU);
+  vec3 ro = EyePos;
 
-  float t = 0.0;
-  float steps = -1.0;
-  for (int j = 0; j < MAX_STEPS; j++) {
-    vec3 p = ro + ray * t;
-    float d = SDF(p);
-    if (d < SURF_EPS) { steps = float(j); break; }
+  float t = 0.0, steps = -1.0;
+  for(int j=0; j<MAX_STEPS; j++){
+    float d = SDF(ro + ray*t);
+    if(d < SURF_EPS){ steps = float(j); break; }
     t += max(d, 0.0005);
-    if (t > MAX_DIST) { steps = float(MAX_STEPS); break; }
+    if(t > MAX_DIST){ steps = float(MAX_STEPS); break; }
   }
 
   vec3 col;
-  if (steps < 0.0) {
+  if(steps < 0.0){
     col = vec3(0.02);
-  } else if (steps >= float(MAX_STEPS) - 0.5) {
+  } else if(steps >= float(MAX_STEPS) - 0.5){
     col = vec3(0.015) + 0.008 * normalize(ray);
   } else {
-    vec3 p = ro + ray * t;
-    vec3 n = normal(p);
-    float ao = 1.0 - steps / float(MAX_STEPS);
+    vec3 p = ro + ray*t;
+    vec3 n = calcN(p);
+    float ao = 1.0 - steps/float(MAX_STEPS);
     float fres = pow(clamp(1.0 - abs(dot(n, -ray)), 0.0, 1.0), 2.0);
-    vec3 base = (cos(p * 0.5) + 2.0) / 3.0;
-    col = base * (ao * 0.75 + fres * 0.6) + 0.03;
+    vec3 base = (cos(p*0.5) + 2.0)/3.0;
+    col = base*(ao*0.75 + fres*0.6) + 0.03;
   }
 
   gl_FragColor = vec4(col, 1.0);
 }
 `;
 
-// --- compile ---
-function makeShader(src, type) {
-  const s = gl.createShader(type);
-  gl.shaderSource(s, src);
-  gl.compileShader(s);
-  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
-    console.error("Shader error:", gl.getShaderInfoLog(s));
-    return null;
-  }
+function makeShader(src, type){
+  const s = gl.createShader(type); gl.shaderSource(s,src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)){ console.error(gl.getShaderInfoLog(s)); return null; }
   return s;
 }
-const vs = makeShader(VERT, gl.VERTEX_SHADER);
-const fs = makeShader(FRAG, gl.FRAGMENT_SHADER);
-if (!vs || !fs) {
-  document.body.innerHTML += '<div style="position:fixed;top:8px;left:8px;color:#f44;font:bold 14px monospace">SHADER ERROR — see F12 console</div>';
-  throw "shader compile failed";
-}
+const vs2 = makeShader(VERT, gl.VERTEX_SHADER);
+const fs2 = makeShader(FRAG, gl.FRAGMENT_SHADER);
+if (!vs2 || !fs2){ document.body.innerHTML += '<div style="position:fixed;top:8px;left:8px;color:#f44;font:bold 14px monospace">SHADER ERROR — see F12</div>'; throw "shader"; }
 
-const prog = gl.createProgram();
-gl.attachShader(prog, vs);
-gl.attachShader(prog, fs);
-gl.linkProgram(prog);
-if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-  console.error("Link error:", gl.getProgramInfoLog(prog));
-  throw "link failed";
-}
+const prog = gl.createProgram(); gl.attachShader(prog, vs2); gl.attachShader(prog, fs2); gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)){ console.error(gl.getProgramInfoLog(prog)); throw "link"; }
 gl.useProgram(prog);
 
-// Fullscreen quad
-const buf = gl.createBuffer();
-gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
-  -1, -1,   1, -1,  -1,  1,
-  -1,  1,   1, -1,   1,  1
-]), gl.STATIC_DRAW);
+const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]), gl.STATIC_DRAW);
+const aP = gl.getAttribLocation(prog, "a_pos");
+gl.enableVertexAttribArray(aP); gl.vertexAttribPointer(aP, 2, gl.FLOAT, false, 0, 0);
 
-const aPos = gl.getAttribLocation(prog, "a_pos");
-gl.enableVertexAttribArray(aPos);
-gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
-
-// Uniforms
 const uT  = gl.getUniformLocation(prog, "T");
 const uR  = gl.getUniformLocation(prog, "R");
 const uFwd= gl.getUniformLocation(prog, "EyeFwd");
-const uRgt= gl.getUniformLocation(prog, "EyeRight");
-const uUp = gl.getUniformLocation(prog, "EyeUp");
-const uCP = gl.getUniformLocation(prog, "CamPos");
+const uRgt= gl.getUniformLocation(prog, "EyeR");
+const uUp = gl.getUniformLocation(prog, "EyeU");
+const uCP = gl.getUniformLocation(prog, "EyePos");
 
-// --- helpers ---
-function buildCamera(yw, pt) {
-  const cy = Math.cos(yw), sy = Math.sin(yw);
-  const cp = Math.cos(pt), sp = Math.sin(pt);
-  const fwd = [cp*sy, sp, cp*cy];
-  const len = Math.sqrt(fwd[0]*fwd[0] + fwd[1]*fwd[1] + fwd[2]*fwd[2]);
-  fwd[0]/=len; fwd[1]/=len; fwd[2]/=len;
-  const rgt = [cy, 0.0, -sy];
-  const u = [
-    rgt[1]*fwd[2] - rgt[2]*fwd[1],
-    rgt[2]*fwd[0] - rgt[0]*fwd[2],
-    rgt[0]*fwd[1] - rgt[1]*fwd[0]
+// Turn a headset orientation into an orthonormal basis:
+//   eye-relative forward     = local -Z rotated by q
+//   eye-relative right       = local +X rotated by q
+//   eye-relative up          = local +Y rotated by q
+// head position comes straight from the XR viewer pose.
+function qrot(q, v){
+  const t = [
+    q[1]*v[2] - q[2]*v[1],
+    q[2]*v[0] - q[0]*v[2],
+    q[0]*v[1] - q[1]*v[0]
   ];
-  return {fwd, rgt, up: u};
+  const u = [t[0]+q[3]*v[0], t[1]+q[3]*v[1], t[2]+q[3]*v[2]];
+  const w = [
+    q[1]*u[2] - q[2]*u[1],
+    q[2]*u[0] - q[0]*u[2],
+    q[0]*u[1] - q[1]*u[0]
+  ];
+  return [v[0]+2*w[0], v[1]+2*w[1], v[2]+2*w[2]];
 }
 
-// --- desktop render loop ---
-function renderDesktop(t) {
-  resize();
-  const cam = buildCamera(yaw, pitch);
-  gl.uniform1f(uT, t);
-  gl.uniform2f(uR, canvas.width, canvas.height);
-  gl.uniform3fv(uFwd, cam.fwd);
-  gl.uniform3fv(uRgt, cam.rgt);
-  gl.uniform3fv(uUp, cam.up);
-  gl.uniform3f(uCP, camX, camY, camZ);
+function drawEye(pose, frustum){
+  if (!frustum || frustum.width <= 0) return;
+  gl.viewport(frustum.x, frustum.y, frustum.width, frustum.height);
+
+  const m = pose.transform.matrix;
+  const q = [m[6], m[7], m[8], m[11]]; // w component around opposite corner
+  const eye = [
+    m[0] * q[3]*2 + q[0]*q[0]*2 - 1,
+    m[1] * q[3]*2 + q[1]*q[1]*2 - 1,
+    m[2] * q[3]*2 + q[2]*q[2]*2 - 1
+  ];
+  // simplified basis from matrix directly (no quaternion)
+  const fwd = [-m[8], -m[9], -m[10]];
+  const rgt = [ m[0],  m[1],  m[2]];
+  const up  = [ m[4],  m[5],  m[6]];
+  const pos = [m[12], m[13], m[14]];
+
+  gl.uniform1f(uT, performance.now()/1000);
+  gl.uniform2f(uR, frustum.width, frustum.height);
+  gl.uniform3fv(uFwd, fwd);
+  gl.uniform3fv(uRgt, rgt);
+  gl.uniform3fv(uUp,  up);
+  gl.uniform3fv(uCP,  pos);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
 }
 
-// --- XR render loop ---
-let xrFrame = null;
-function renderXR(time, frame) {
-  xrFrame = frame;
-  const session = frame.session;
-  const pose = frame.getViewerPose(xrRefSpace);
-  if (!pose) {
-    session.requestAnimationFrame(renderXR);
-    return;
-  }
+function frame(time, frame){
+  const pose = frame.getViewerPose(refSpace);
+  if (!pose){ session.requestAnimationFrame(frame); return; }
 
   const layer = session.renderState.baseLayer;
   gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
 
-  for (const view of pose.views) {
-    const raw = view.viewport;
-    let vp;
-    if (raw && raw.x !== undefined && raw.width > 0 && raw.height > 0) {
-      vp = raw;
+  const fbW = layer.framebufferWidth;
+  const fbH = layer.framebufferHeight;
+  const half = fbW >> 1;
+
+  for (const view of pose.views){
+    const vp = view.viewport;
+    if (vp){
+      drawEye(view, vp);
     } else {
-      // Fallback: side-by-side stereo using real framebuffer dims
-      const fbW = layer.framebufferWidth;
-      const fbH = layer.framebufferHeight;
-      const half = fbW >> 1;
       const eye = view.eye || (view.viewIndex === 0 ? "left" : "right");
-      vp = { x: eye === "left" ? 0 : half, y: 0, width: half, height: fbH };
+      drawEye(view, {x: eye==="left"?0:half, y:0, width:half, height:fbH});
     }
-    gl.viewport(vp.x, vp.y, vp.width, vp.height);
-    // Use view matrix directly — it encodes both head rotation AND per-eye IPD offset
-    const m = view.transform.matrix; // column-major 4x4
-    const right = [m[0], m[1], m[2]];             // col 0 = X basis
-    const up    = [m[4], m[5], m[6]];             // col 1 = Y basis
-    const fwd   = [-m[8], -m[9], -m[10]];         // -col 2 = camera looks down -Z
-    const pos   = [m[12], m[13], m[14]];          // col 3 = translation (includes IPD)
-
-    gl.uniform1f(uT, time / 1000.0);
-    gl.uniform2f(uR, vp.width, vp.height);
-    gl.uniform3fv(uFwd, fwd);
-    gl.uniform3fv(uRgt, right);
-    gl.uniform3fv(uUp, up);
-    gl.uniform3fv(uCP, pos);
-    gl.drawArrays(gl.TRIANGLES, 0, 6);
   }
-
-  session.requestAnimationFrame(renderXR);
+  session.requestAnimationFrame(frame);
 }
 
-// --- main entry ---
-const t0 = performance.now();
-(function loop(now) {
-  if (xrSession) {
-    // XR calls its own rAF via requestAnimationFrame inside renderXR
-    return;
-  }
-  const t = now - t0;
-  renderDesktop(t);
+(function loop(){
+  if (session) return;
+  gl.uniform1f(uT, performance.now()/1000);
+  gl.uniform2f(uR, canvas.width, canvas.height);
+  gl.uniform3fv(uFwd, [0,0,-1]);
+  gl.uniform3fv(uRgt, [1,0,0]);
+  gl.uniform3fv(uUp,  [0,1,0]);
+  gl.uniform3fv(uCP,  [0,0,3]);
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
   requestAnimationFrame(loop);
-})(performance.now());
+})();
 </script>
 </body>
 </html>
