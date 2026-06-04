@@ -178,9 +178,9 @@ function drawEyeFromPose(q, pos, eyeRight, vpWidth, vpHeight, time){
   // Rotate forward toward the eye's positional offset so both eyes converge
   const offR = eyeRight ? sep : -sep;
   const fwdC = [
-    fwd[0] - rgt[0] * offR * 0.75,
-    fwd[1] - rgt[1] * offR * 0.75,
-    fwd[2] - rgt[2] * offR * 0.75
+    fwd[0] + rgt[0] * offR * 0.75,
+    fwd[1] + rgt[1] * offR * 0.75,
+    fwd[2] + rgt[2] * offR * 0.75
   ];
   gl.uniform1f(uT, time/1000);
   gl.uniform2f(uR, vp.width, vp.height);
