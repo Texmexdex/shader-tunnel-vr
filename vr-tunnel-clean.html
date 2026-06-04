@@ -164,8 +164,7 @@ function qrot(q, v){
 
 // Render one eye. `eyeRight` chooses left/right half and IPD sign.
 function drawEyeFromPose(q, pos, eyeRight, vpWidth, vpHeight, time){
-  const fbW = canvas.width;
-  const half = fbW >> 1;
+  const half = vpWidth >> 1;
   const vp = { x: eyeRight ? half : 0, y: 0, width: half, height: vpHeight };
   gl.viewport(vp.x, vp.y, vp.width, vp.height);
   const fwd = qrot(q, [0,0,-1]);
