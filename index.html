@@ -2,96 +2,138 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Truchet Tunnel 3D</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Truchet Tunnel 3D — WebXR</title>
 <style>
   html,body{margin:0;padding:0;overflow:hidden;background:#000;font-family:system-ui,sans-serif}
   canvas{display:block;width:100vw;height:100vh;cursor:crosshair}
-  #info{position:fixed;bottom:12px;left:50%;transform:translateX(-50%);color:#555;font-size:13px;pointer-events:none;text-align:center}
+  #info{position:fixed;bottom:12px;left:50%;transform:translateX(-50%);color:#777;font-size:13px;pointer-events:none;text-align:center;line-height:1.5;text-shadow:0 1px 2px #000}
+  #vr{position:fixed;top:16px;right:16px;display:none;padding:12px 20px;font:600 15px system-ui,sans-serif;
+      color:#fff;background:#1769ff;border:none;border-radius:8px;cursor:pointer;box-shadow:0 4px 14px rgba(23,105,255,.4)}
+  #vr:hover{background:#0d57e0}
+  #vr:disabled{background:#444;color:#999;cursor:default;box-shadow:none}
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
-<div id="info">drag=look &middot; scroll=move &middot; F=fullscreen</div>
+<button id="vr">Enter VR</button>
+<div id="info">
+  desktop: drag / click = look &middot; WASD = move &middot; space/C = up/down &middot; shift = boost &middot; scroll = forward &middot; F = fullscreen<br>
+  VR (Quest 3): left stick = fly &middot; right stick = snap-turn + up/down &middot; trigger = boost
+</div>
 <script>
 "use strict";
+
 const canvas = document.getElementById("c");
-const gl = canvas.getContext("webgl", {antialias:false, alpha:false})
-       || canvas.getContext("experimental-webgl");
+const gl = canvas.getContext("webgl", {antialias:false, alpha:false, xrCompatible:true})
+       || canvas.getContext("experimental-webgl", {antialias:false, alpha:false, xrCompatible:true});
 if (!gl) { document.body.innerHTML = '<div style="color:#fff;padding:40px">WebGL not supported.</div>'; throw "no gl"; }
 
-// --- camera ---
-let yaw = 0.0;
-let pitch = 0.0;
-let camX = 0.0;
-let camY = 0.0;
-let camZ = 0.0;
-let dragging = false;
-let lastX = 0, lastY = 0;
+/* ===================================================================
+   Camera / player state
+   - yaw/pitch + camPos drive the desktop free-fly camera.
+   - playerPos + playerYaw form the VR "locomotion rig": the headset
+     pose is composed on top of this so head tracking stays 1:1 while
+     the sticks move/turn the rig through the scene.
+=================================================================== */
+let yaw = 0.0, pitch = 0.0;
+let camPos = [0.5, 0.5, 0.5];
+
+let playerPos = [0.5, 1.0, 0.5];
+let playerYaw = 0.0;
+
+let mode = "desktop";        // "desktop" | "xr"
+let desktopRAF = null;
+let lastNow = performance.now();
+const t0 = performance.now();
+
+/* ===================== desktop input ===================== */
+const keys = new Set();
+let dragging = false, lastX = 0, lastY = 0;
 
 canvas.addEventListener("mousedown", e => { dragging = true; lastX = e.clientX; lastY = e.clientY; });
 window.addEventListener("mouseup", () => { dragging = false; });
+canvas.addEventListener("click", () => {
+  if (mode === "desktop" && !document.pointerLockElement) canvas.requestPointerLock();
+});
 window.addEventListener("mousemove", e => {
-  if (!dragging) return;
-  yaw   -= (e.clientX - lastX) * 0.005;
-  pitch -= (e.clientY - lastY) * 0.005;
-  pitch = Math.max(-1.4, Math.min(1.4, pitch));
-  lastX = e.clientX; lastY = e.clientY;
+  if (document.pointerLockElement === canvas) {
+    yaw   -= e.movementX * 0.0025;
+    pitch -= e.movementY * 0.0025;
+    pitch = Math.max(-1.5, Math.min(1.5, pitch));
+  } else if (dragging) {
+    yaw   -= (e.clientX - lastX) * 0.005;
+    pitch -= (e.clientY - lastY) * 0.005;
+    pitch = Math.max(-1.5, Math.min(1.5, pitch));
+    lastX = e.clientX; lastY = e.clientY;
+  }
 });
 
 canvas.addEventListener("wheel", e => {
   const cy = Math.cos(yaw), sy = Math.sin(yaw);
   const cp = Math.cos(pitch), sp = Math.sin(pitch);
-  const fx = cp * sy;
-  const fy = sp;
-  const fz = cp * cy;
   const amt = e.deltaY * 0.015;
-  camX += fx * amt;
-  camY += fy * amt;
-  camZ += fz * amt;
-  e.preventDefault();
+  camPos[0] += cp * sy * amt;
+  camPos[1] += sp * amt;
+  camPos[2] += cp * cy * amt;
 }, {passive: true});
 
 window.addEventListener("keydown", e => {
-  if (e.key === "f" || e.key === "F") {
+  const k = e.key.toLowerCase();
+  keys.add(k);
+  if (k === "f") {
     if (document.fullscreenElement) document.exitFullscreen();
     else document.body.requestFullscreen().catch(()=>{});
   }
 });
+window.addEventListener("keyup", e => keys.delete(e.key.toLowerCase()));
 
 function resize() {
   const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
   canvas.width  = Math.floor(window.innerWidth  * dpr);
   canvas.height = Math.floor(window.innerHeight * dpr);
-  gl.viewport(0, 0, canvas.width, canvas.height);
+  if (mode === "desktop") gl.viewport(0, 0, canvas.width, canvas.height);
 }
 window.addEventListener("resize", resize);
 resize();
 
-// --- shader sources ---
-const VERT = `attribute vec2 a_pos;
-void main() { gl_Position = vec4(a_pos, 0.0, 1.0); }`;
+/* ===================================================================
+   Shaders
+   The vertex shader unprojects the fullscreen-quad corners through the
+   inverse projection matrix to get a view-space ray, then rotates it
+   into world space with the camera rotation. This makes the exact same
+   shader work for the desktop camera and for each VR eye (including the
+   off-axis per-eye frustums the headset reports).
+=================================================================== */
+const VERT = `
+attribute vec2 a_pos;
+uniform mat4 uInvProj;   // inverse(projection)
+uniform mat3 uCamRot;    // camera/eye rotation (view -> world)
+varying vec3 vRd;
+void main() {
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+  vec4 far = uInvProj * vec4(a_pos, 1.0, 1.0);   // far-plane point in view space
+  vec3 dir = far.xyz / far.w;                    // camera sits at view-space origin
+  vRd = uCamRot * dir;                           // rotate into world space
+}`;
 
 const FRAG = `
 precision highp float;
 
 uniform float T;
-uniform vec2  R;
-uniform vec2  YP;
-uniform vec3  CamPos;
+uniform vec3  Ro;     // ray origin (world)
+varying vec3  vRd;    // ray direction (world, unnormalized)
 
-// --- constants ---
 #define MAX_STEPS 80
 #define MAX_DIST  40.0
 #define SURF_EPS  0.002
 
-// --- hash ---
 float hash(vec3 p) {
   p = fract(p * vec3(443.8975, 441.4236, 437.1954));
   p += dot(p, p.yzx + 19.19);
   return fract((p.x + p.y) * p.z);
 }
 
-// --- truchet shapes ---
 float arc(vec3 pos) {
   float r = length(pos.xy);
   float ax = pow(abs(r - 0.5), 8.0);
@@ -106,7 +148,6 @@ float cell(vec3 pos) {
   ), arc(vec3(1.0 - pos.y, 1.0 - pos.z, pos.x)));
 }
 
-// --- SDF with 8 mirrored variants ---
 float SDF(vec3 p) {
   vec3 f = fract(p);
   vec3 g = floor(p);
@@ -123,7 +164,6 @@ float SDF(vec3 p) {
   return cell(q);
 }
 
-// --- normal via central differences ---
 vec3 normal(vec3 p) {
   float e = 0.0005;
   float h = SDF(p);
@@ -135,21 +175,9 @@ vec3 normal(vec3 p) {
 }
 
 void main() {
-  // Normalised screen coords
-  vec2 uv = (2.0 * gl_FragCoord.xy - R) / length(R);
+  vec3 ro = Ro;
+  vec3 rd = normalize(vRd);
 
-  // Camera orientation
-  float cy = cos(YP.x), sy = sin(YP.x);
-  float cp = cos(YP.y), sp = sin(YP.y);
-  vec3 fwd = normalize(vec3(cp * sy, sp, cp * cy));
-  vec3 rgt = normalize(vec3(cy, 0.0, -sy));
-  vec3 up  = normalize(cross(rgt, fwd));
-  vec3 rd  = normalize(fwd + uv.x * rgt + uv.y * up);
-
-  // Camera position from JS (moves in facing direction)
-  vec3 ro = CamPos + vec3(0.25, 0.25, 0.5);
-
-  // --- proper sphere trace ---
   float t = 0.0;
   float steps = -1.0;
   for (int j = 0; j < MAX_STEPS; j++) {
@@ -175,10 +203,9 @@ void main() {
   }
 
   gl_FragColor = vec4(col, 1.0);
-}
-`;
+}`;
 
-// --- compile & link ---
+/* ===================== compile & link ===================== */
 function makeShader(src, type) {
   const s = gl.createShader(type);
   gl.shaderSource(s, src);
@@ -207,7 +234,6 @@ if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
 }
 gl.useProgram(prog);
 
-// Fullscreen quad
 const buf = gl.createBuffer();
 gl.bindBuffer(gl.ARRAY_BUFFER, buf);
 gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
@@ -219,23 +245,300 @@ const aPos = gl.getAttribLocation(prog, "a_pos");
 gl.enableVertexAttribArray(aPos);
 gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
 
-// Uniforms
-const uT  = gl.getUniformLocation(prog, "T");
-const uR  = gl.getUniformLocation(prog, "R");
-const uYP = gl.getUniformLocation(prog, "YP");
-const uCP = gl.getUniformLocation(prog, "CamPos");
+const uT       = gl.getUniformLocation(prog, "T");
+const uRo      = gl.getUniformLocation(prog, "Ro");
+const uInvProj = gl.getUniformLocation(prog, "uInvProj");
+const uCamRot  = gl.getUniformLocation(prog, "uCamRot");
 
-// --- render loop ---
-const t0 = performance.now();
-(function loop() {
-  const t = (performance.now() - t0) / 1000.0;
-  gl.uniform1f(uT,  t);
-  gl.uniform2f(uR, canvas.width, canvas.height);
-  gl.uniform2f(uYP, yaw, pitch);
-  gl.uniform3f(uCP, camX, camY, camZ);
+gl.clearColor(0, 0, 0, 1);
+
+function drawView(invProj, camRot, ro, t) {
+  gl.uniform1f(uT, t);
+  gl.uniform3f(uRo, ro[0], ro[1], ro[2]);
+  gl.uniformMatrix4fv(uInvProj, false, invProj);
+  gl.uniformMatrix3fv(uCamRot, false, camRot);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
-  requestAnimationFrame(loop);
-})();
+}
+
+/* ===================================================================
+   Matrix / vector helpers (column-major, gl-matrix style)
+=================================================================== */
+function perspective(fovy, aspect, near, far) {
+  const f = 1 / Math.tan(fovy / 2);
+  const nf = 1 / (near - far);
+  return new Float32Array([
+    f / aspect, 0, 0, 0,
+    0, f, 0, 0,
+    0, 0, (far + near) * nf, -1,
+    0, 0, 2 * far * near * nf, 0
+  ]);
+}
+
+function invertMat4(m) {
+  const out = new Float32Array(16);
+  const a00=m[0],a01=m[1],a02=m[2],a03=m[3];
+  const a10=m[4],a11=m[5],a12=m[6],a13=m[7];
+  const a20=m[8],a21=m[9],a22=m[10],a23=m[11];
+  const a30=m[12],a31=m[13],a32=m[14],a33=m[15];
+  const b00=a00*a11-a01*a10, b01=a00*a12-a02*a10, b02=a00*a13-a03*a10;
+  const b03=a01*a12-a02*a11, b04=a01*a13-a03*a11, b05=a02*a13-a03*a12;
+  const b06=a20*a31-a21*a30, b07=a20*a32-a22*a30, b08=a20*a33-a23*a30;
+  const b09=a21*a32-a22*a31, b10=a21*a33-a23*a31, b11=a22*a33-a23*a32;
+  let det = b00*b11-b01*b10+b02*b09+b03*b08-b04*b07+b05*b06;
+  if (!det) return out;
+  det = 1.0 / det;
+  out[0]=(a11*b11-a12*b10+a13*b09)*det;
+  out[1]=(a02*b10-a01*b11-a03*b09)*det;
+  out[2]=(a31*b05-a32*b04+a33*b03)*det;
+  out[3]=(a22*b04-a21*b05-a23*b03)*det;
+  out[4]=(a12*b08-a10*b11-a13*b07)*det;
+  out[5]=(a00*b11-a02*b08+a03*b07)*det;
+  out[6]=(a32*b02-a30*b05-a33*b01)*det;
+  out[7]=(a20*b05-a22*b02+a23*b01)*det;
+  out[8]=(a10*b10-a11*b08+a13*b06)*det;
+  out[9]=(a01*b08-a00*b10-a03*b06)*det;
+  out[10]=(a30*b04-a31*b02+a33*b00)*det;
+  out[11]=(a21*b02-a20*b04-a23*b00)*det;
+  out[12]=(a11*b07-a10*b09-a12*b06)*det;
+  out[13]=(a00*b09-a01*b07+a02*b06)*det;
+  out[14]=(a31*b01-a30*b03-a32*b00)*det;
+  out[15]=(a20*b03-a21*b01+a22*b00)*det;
+  return out;
+}
+
+// out = a * b  (so (a*b)*v applies b first, then a)
+function mat4mul(a, b) {
+  const out = new Float32Array(16);
+  for (let c = 0; c < 4; c++) {
+    const b0=b[c*4], b1=b[c*4+1], b2=b[c*4+2], b3=b[c*4+3];
+    out[c*4]   = a[0]*b0 + a[4]*b1 + a[8]*b2  + a[12]*b3;
+    out[c*4+1] = a[1]*b0 + a[5]*b1 + a[9]*b2  + a[13]*b3;
+    out[c*4+2] = a[2]*b0 + a[6]*b1 + a[10]*b2 + a[14]*b3;
+    out[c*4+3] = a[3]*b0 + a[7]*b1 + a[11]*b2 + a[15]*b3;
+  }
+  return out;
+}
+
+function mat3FromMat4(m) {
+  return new Float32Array([ m[0],m[1],m[2], m[4],m[5],m[6], m[8],m[9],m[10] ]);
+}
+
+function cross(a, b) {
+  return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+}
+
+function rotY(v, a) {
+  const c = Math.cos(a), s = Math.sin(a);
+  return [c*v[0] + s*v[2], v[1], -s*v[0] + c*v[2]];
+}
+
+// Locomotion rig matrix: rotationY(playerYaw) with translation playerPos.
+function playerMatrix() {
+  const c = Math.cos(playerYaw), s = Math.sin(playerYaw);
+  return new Float32Array([
+    c, 0, -s, 0,
+    0, 1,  0, 0,
+    s, 0,  c, 0,
+    playerPos[0], playerPos[1], playerPos[2], 1
+  ]);
+}
+
+/* ===================== desktop render loop ===================== */
+function startDesktopLoop() {
+  if (desktopRAF) cancelAnimationFrame(desktopRAF);
+  lastNow = performance.now();
+  desktopRAF = requestAnimationFrame(desktopFrame);
+}
+
+function desktopFrame(now) {
+  if (mode !== "desktop") return;
+  const dt = Math.min((now - lastNow) / 1000, 0.1);
+  lastNow = now;
+
+  const cy = Math.cos(yaw), sy = Math.sin(yaw);
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  const fwd = [cp*sy, sp, cp*cy];
+  const rgt = [cy, 0, -sy];
+
+  let mf = 0, ms = 0, mu = 0;
+  if (keys.has("w")) mf += 1;
+  if (keys.has("s")) mf -= 1;
+  if (keys.has("d")) ms += 1;
+  if (keys.has("a")) ms -= 1;
+  if (keys.has(" ")) mu += 1;
+  if (keys.has("c")) mu -= 1;
+  const speed = (keys.has("shift") ? 6.0 : 2.0) * dt;
+  camPos[0] += (fwd[0]*mf + rgt[0]*ms) * speed;
+  camPos[1] += (fwd[1]*mf + rgt[1]*ms + mu) * speed;
+  camPos[2] += (fwd[2]*mf + rgt[2]*ms) * speed;
+
+  const aspect = canvas.width / canvas.height;
+  const invProj = invertMat4(perspective(1.1, aspect, 0.01, 100));
+  const up = cross(rgt, fwd);
+  const camRot = new Float32Array([ rgt[0],rgt[1],rgt[2], up[0],up[1],up[2], -fwd[0],-fwd[1],-fwd[2] ]);
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  drawView(invProj, camRot, camPos, (now - t0) / 1000);
+
+  desktopRAF = requestAnimationFrame(desktopFrame);
+}
+
+/* ===================================================================
+   WebXR — immersive VR for Quest 3
+=================================================================== */
+let xrSession = null;
+let xrRefSpace = null;
+let lastXR = 0;
+let snapReady = true;
+const SNAP = Math.PI / 6;        // 30 degrees per flick
+const DEAD = 0.18;               // thumbstick dead zone
+const vrBtn = document.getElementById("vr");
+
+function dead(v) {
+  return Math.abs(v) < DEAD ? 0 : (v - Math.sign(v) * DEAD) / (1 - DEAD);
+}
+
+if (navigator.xr) {
+  navigator.xr.isSessionSupported("immersive-vr").then(ok => {
+    vrBtn.style.display = "block";
+    if (ok) {
+      vrBtn.onclick = enterVR;
+    } else {
+      vrBtn.textContent = "VR not available";
+      vrBtn.disabled = true;
+    }
+  }).catch(() => {});
+} else {
+  console.warn("WebXR not found. Serve this over HTTPS (or localhost) and open it in the Quest 3 browser.");
+}
+
+async function enterVR() {
+  try {
+    await gl.makeXRCompatible();
+    xrSession = await navigator.xr.requestSession("immersive-vr", {
+      requiredFeatures: ["local-floor"],
+      optionalFeatures: ["bounded-floor"]
+    });
+
+    const layer = new XRWebGLLayer(xrSession, gl, {
+      antialias: false,
+      depth: false,
+      framebufferScaleFactor: 0.7   // raymarching is heavy; trade a little sharpness for frame rate
+    });
+    xrSession.updateRenderState({ baseLayer: layer });
+
+    xrRefSpace = await xrSession.requestReferenceSpace("local-floor");
+
+    xrSession.addEventListener("end", onXREnd);
+
+    mode = "xr";
+    if (desktopRAF) { cancelAnimationFrame(desktopRAF); desktopRAF = null; }
+    vrBtn.textContent = "In VR…";
+    lastXR = 0;
+    xrSession.requestAnimationFrame(onXRFrame);
+  } catch (err) {
+    console.error("Failed to start VR session:", err);
+    vrBtn.textContent = "VR failed — see console";
+  }
+}
+
+function onXREnd() {
+  xrSession = null;
+  xrRefSpace = null;
+  mode = "desktop";
+  vrBtn.textContent = "Enter VR";
+  vrBtn.disabled = false;
+  resize();
+  startDesktopLoop();
+}
+
+function snapTurn(delta, headLocal) {
+  // Rotate the rig about the player's own head so the view pivots in place.
+  const before = rotY(headLocal, playerYaw);
+  playerYaw += delta;
+  const after = rotY(headLocal, playerYaw);
+  playerPos[0] += before[0] - after[0];
+  playerPos[1] += before[1] - after[1];
+  playerPos[2] += before[2] - after[2];
+}
+
+function updateXRInput(session, pose, headWorld, dt) {
+  let mf = 0, ms = 0, mu = 0, rsx = 0, boost = false;
+
+  for (const src of session.inputSources) {
+    const gp = src.gamepad;
+    if (!gp) continue;
+    const ax = gp.axes;
+    let sx = 0, sy = 0;
+    if (ax.length >= 4)      { sx = ax[2]; sy = ax[3]; }  // xr-standard thumbstick
+    else if (ax.length >= 2) { sx = ax[0]; sy = ax[1]; }  // fallback
+    sx = dead(sx); sy = dead(sy);
+
+    const trig = (gp.buttons[0] && gp.buttons[0].pressed) ||
+                 (gp.buttons[1] && gp.buttons[1].pressed);
+    if (trig) boost = true;
+
+    if (src.handedness === "right") {
+      rsx = sx;          // snap turn
+      mu += -sy;         // vertical fly
+    } else {             // left or unknown
+      mf += -sy;         // forward/back along head gaze
+      ms += sx;          // strafe
+    }
+  }
+
+  // Comfort-oriented snap turn with edge detection.
+  if (Math.abs(rsx) > 0.7 && snapReady) {
+    const head = pose.transform.position;
+    snapTurn(rsx > 0 ? -SNAP : SNAP, [head.x, head.y, head.z]);
+    snapReady = false;
+  } else if (Math.abs(rsx) < 0.3) {
+    snapReady = true;
+  }
+
+  // Movement directions taken from the head pose in scene space.
+  const fwd = [-headWorld[8], -headWorld[9], -headWorld[10]];
+  const right = [headWorld[0], headWorld[1], headWorld[2]];
+  const speed = (boost ? 6.0 : 2.0) * dt;
+  playerPos[0] += (fwd[0]*mf + right[0]*ms) * speed;
+  playerPos[1] += (fwd[1]*mf + right[1]*ms + mu) * speed;
+  playerPos[2] += (fwd[2]*mf + right[2]*ms) * speed;
+}
+
+function onXRFrame(time, frame) {
+  const session = frame.session;
+  session.requestAnimationFrame(onXRFrame);
+
+  const dt = lastXR ? Math.min((time - lastXR) / 1000, 0.1) : 0;
+  lastXR = time;
+
+  const pose = frame.getViewerPose(xrRefSpace);
+  if (!pose) return;
+
+  // Compose head pose onto the locomotion rig, then read the sticks.
+  const headWorld = mat4mul(playerMatrix(), pose.transform.matrix);
+  updateXRInput(session, pose, headWorld, dt);
+
+  const rig = playerMatrix();   // refreshed after this frame's movement/turn
+  const layer = session.renderState.baseLayer;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+
+  const t = time / 1000;
+  for (const view of pose.views) {
+    const vp = layer.getViewport(view);
+    gl.viewport(vp.x, vp.y, vp.width, vp.height);
+
+    const worldMat = mat4mul(rig, view.transform.matrix);  // eye -> scene
+    const invProj  = invertMat4(view.projectionMatrix);
+    const camRot   = mat3FromMat4(worldMat);
+    drawView(invProj, camRot, [worldMat[12], worldMat[13], worldMat[14]], t);
+  }
+}
+
+/* ===================== go ===================== */
+startDesktopLoop();
 </script>
 </body>
 </html>
