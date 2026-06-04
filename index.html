@@ -3,46 +3,62 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
-<title>Truchet Tunnel 3D — WebXR</title>
+<title>Shader Gallery — WebXR</title>
 <style>
   html,body{margin:0;padding:0;overflow:hidden;background:#000;font-family:system-ui,sans-serif}
   canvas{display:block;width:100vw;height:100vh;cursor:crosshair}
-  #info{position:fixed;bottom:12px;left:50%;transform:translateX(-50%);color:#777;font-size:13px;pointer-events:none;text-align:center;line-height:1.5;text-shadow:0 1px 2px #000}
-  #vr{position:fixed;top:16px;right:16px;display:none;padding:12px 20px;font:600 15px system-ui,sans-serif;
-      color:#fff;background:#1769ff;border:none;border-radius:8px;cursor:pointer;box-shadow:0 4px 14px rgba(23,105,255,.4)}
+  .ui{position:fixed;font:600 14px system-ui,sans-serif;color:#fff}
+  #vr{top:16px;right:16px;display:none;padding:12px 20px;background:#1769ff;border:none;border-radius:8px;
+      cursor:pointer;box-shadow:0 4px 14px rgba(23,105,255,.4)}
   #vr:hover{background:#0d57e0}
   #vr:disabled{background:#444;color:#999;cursor:default;box-shadow:none}
+  #menuBtn{top:16px;left:16px;padding:10px 16px;background:rgba(10,12,20,.85);border:1px solid #2a3550;
+           border-radius:8px;cursor:pointer;backdrop-filter:blur(6px)}
+  #menuBtn:hover{background:rgba(30,40,70,.9)}
+  #menu{top:60px;left:16px;display:none;flex-direction:column;gap:4px;padding:8px;min-width:220px;
+        background:rgba(10,12,20,.92);border:1px solid #2a3550;border-radius:10px;backdrop-filter:blur(8px)}
+  #menu.open{display:flex}
+  #menu .title{font-size:11px;letter-spacing:1px;color:#6b7a9e;padding:4px 8px;text-transform:uppercase}
+  #menu button{display:flex;justify-content:space-between;align-items:center;gap:12px;text-align:left;
+               padding:9px 12px;background:transparent;border:1px solid transparent;border-radius:6px;
+               color:#cdd6ea;font:500 14px system-ui,sans-serif;cursor:pointer}
+  #menu button:hover{background:rgba(40,52,86,.7)}
+  #menu button.active{background:#1769ff;color:#fff;border-color:#3b82ff}
+  #menu button .key{font:600 11px monospace;opacity:.5}
+  #info{bottom:12px;left:50%;transform:translateX(-50%);color:#8a96b2;font-weight:400;font-size:13px;
+        pointer-events:none;text-align:center;line-height:1.6;text-shadow:0 1px 3px #000}
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
-<button id="vr">Enter VR</button>
-<div id="info">
-  desktop: drag / click = look &middot; WASD = move &middot; space/C = up/down &middot; shift = boost &middot; scroll = forward &middot; F = fullscreen<br>
-  VR (Quest 3): left stick = fly &middot; right stick = snap-turn + up/down &middot; trigger = boost
+<button id="vr" class="ui">Enter VR</button>
+<button id="menuBtn" class="ui">Shaders &#9662;</button>
+<div id="menu" class="ui"></div>
+<div id="info" class="ui">
+  drag / click = look &middot; WASD = move &middot; space/C = up/down &middot; shift = boost &middot; 1-4 = switch &middot; M = menu &middot; F = fullscreen<br>
+  VR (Quest 3): left stick = fly &middot; right stick = snap-turn + up/down &middot; trigger = boost &middot; B/Y = shader menu
 </div>
 <script>
 "use strict";
 
+/* ===================================================================
+   Setup
+=================================================================== */
 const canvas = document.getElementById("c");
 const gl = canvas.getContext("webgl", {antialias:false, alpha:false, xrCompatible:true})
        || canvas.getContext("experimental-webgl", {antialias:false, alpha:false, xrCompatible:true});
 if (!gl) { document.body.innerHTML = '<div style="color:#fff;padding:40px">WebGL not supported.</div>'; throw "no gl"; }
 
-/* ===================================================================
-   Camera / player state
-   - yaw/pitch + camPos drive the desktop free-fly camera.
-   - playerPos + playerYaw form the VR "locomotion rig": the headset
-     pose is composed on top of this so head tracking stays 1:1 while
-     the sticks move/turn the rig through the scene.
-=================================================================== */
-let yaw = 0.0, pitch = 0.0;
-let camPos = [0.5, 0.5, 0.5];
+const VR_RES   = 1.0;   // VR framebuffer scale (1.0 = native eye buffer; lower = faster, higher = sharper)
+const DPR_CAP  = 2.0;   // desktop max device-pixel-ratio
 
+/* Camera / locomotion state */
+let yaw = 0.0, pitch = 0.0;
+let camPos = [0.5, 1.0, 0.5];
 let playerPos = [0.5, 1.0, 0.5];
 let playerYaw = 0.0;
 
-let mode = "desktop";        // "desktop" | "xr"
+let mode = "desktop";          // "desktop" | "xr"
 let desktopRAF = null;
 let lastNow = performance.now();
 const t0 = performance.now();
@@ -68,7 +84,6 @@ window.addEventListener("mousemove", e => {
     lastX = e.clientX; lastY = e.clientY;
   }
 });
-
 canvas.addEventListener("wheel", e => {
   const cy = Math.cos(yaw), sy = Math.sin(yaw);
   const cp = Math.cos(pitch), sp = Math.sin(pitch);
@@ -84,12 +99,17 @@ window.addEventListener("keydown", e => {
   if (k === "f") {
     if (document.fullscreenElement) document.exitFullscreen();
     else document.body.requestFullscreen().catch(()=>{});
+  } else if (k === "m") {
+    toggleDesktopMenu();
+  } else if (k >= "1" && k <= "9") {
+    const i = parseInt(k, 10) - 1;
+    if (i < SHADERS.length) switchShader(i);
   }
 });
 window.addEventListener("keyup", e => keys.delete(e.key.toLowerCase()));
 
 function resize() {
-  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+  const dpr = Math.min(window.devicePixelRatio || 1, DPR_CAP);
   canvas.width  = Math.floor(window.innerWidth  * dpr);
   canvas.height = Math.floor(window.innerHeight * dpr);
   if (mode === "desktop") gl.viewport(0, 0, canvas.width, canvas.height);
@@ -98,112 +118,180 @@ window.addEventListener("resize", resize);
 resize();
 
 /* ===================================================================
-   Shaders
-   The vertex shader unprojects the fullscreen-quad corners through the
-   inverse projection matrix to get a view-space ray, then rotates it
-   into world space with the camera rotation. This makes the exact same
-   shader work for the desktop camera and for each VR eye (including the
-   off-axis per-eye frustums the headset reports).
+   Shared vertex shader: unproject quad corners through inverse
+   projection to a view-space ray, rotate into world space. Works for
+   the desktop camera and for each VR eye (asymmetric frustums).
 =================================================================== */
 const VERT = `
 attribute vec2 a_pos;
-uniform mat4 uInvProj;   // inverse(projection)
-uniform mat3 uCamRot;    // camera/eye rotation (view -> world)
+uniform mat4 uInvProj;
+uniform mat3 uCamRot;
 varying vec3 vRd;
 void main() {
   gl_Position = vec4(a_pos, 0.0, 1.0);
-  vec4 far = uInvProj * vec4(a_pos, 1.0, 1.0);   // far-plane point in view space
-  vec3 dir = far.xyz / far.w;                    // camera sits at view-space origin
-  vRd = uCamRot * dir;                           // rotate into world space
+  vec4 far = uInvProj * vec4(a_pos, 1.0, 1.0);
+  vec3 dir = far.xyz / far.w;
+  vRd = uCamRot * dir;
 }`;
 
-const FRAG = `
+const FRAG_HEAD = `
 precision highp float;
-
 uniform float T;
-uniform vec3  Ro;     // ray origin (world)
-varying vec3  vRd;    // ray direction (world, unnormalized)
+uniform vec3  Ro;
+varying vec3  vRd;
+`;
 
+const FRAG_MAIN = `
+void main() {
+  gl_FragColor = vec4(shade(Ro, normalize(vRd)), 1.0);
+}`;
+
+/* ---------- 1. Truchet tunnel ---------- */
+const BODY_TRUCHET = `
 #define MAX_STEPS 80
 #define MAX_DIST  40.0
 #define SURF_EPS  0.002
-
-float hash(vec3 p) {
-  p = fract(p * vec3(443.8975, 441.4236, 437.1954));
-  p += dot(p, p.yzx + 19.19);
-  return fract((p.x + p.y) * p.z);
-}
-
-float arc(vec3 pos) {
-  float r = length(pos.xy);
-  float ax = pow(abs(r - 0.5), 8.0);
-  float ay = pow(abs(pos.z - 0.5), 8.0);
-  return pow(ax + ay, 0.125) - 0.08;
-}
-
-float cell(vec3 pos) {
-  return min(min(
-    arc(pos),
-    arc(vec3(pos.z, 1.0 - pos.x, pos.y))
-  ), arc(vec3(1.0 - pos.y, 1.0 - pos.z, pos.x)));
-}
-
-float SDF(vec3 p) {
-  vec3 f = fract(p);
-  vec3 g = floor(p);
-  float rnd = hash(g);
-  vec3 q;
-  if      (rnd < 0.125) q = f;
-  else if (rnd < 0.250) q = vec3(f.x,       1.0 - f.y, f.z);
-  else if (rnd < 0.375) q = vec3(1.0 - f.x,  f.y,      f.z);
-  else if (rnd < 0.500) q = vec3(1.0 - f.x,  1.0 - f.y, f.z);
-  else if (rnd < 0.625) q = vec3(f.y,        f.x,      1.0 - f.z);
-  else if (rnd < 0.750) q = vec3(f.y,        1.0 - f.x, 1.0 - f.z);
-  else if (rnd < 0.875) q = vec3(1.0 - f.y,   f.x,      1.0 - f.z);
-  else                   q = vec3(1.0 - f.y,   1.0 - f.x, 1.0 - f.z);
+float hash(vec3 p){ p=fract(p*vec3(443.8975,441.4236,437.1954)); p+=dot(p,p.yzx+19.19); return fract((p.x+p.y)*p.z); }
+float arc(vec3 pos){ float r=length(pos.xy); float ax=pow(abs(r-0.5),8.0); float ay=pow(abs(pos.z-0.5),8.0); return pow(ax+ay,0.125)-0.08; }
+float cell(vec3 pos){ return min(min(arc(pos), arc(vec3(pos.z,1.0-pos.x,pos.y))), arc(vec3(1.0-pos.y,1.0-pos.z,pos.x))); }
+float SDF(vec3 p){
+  vec3 f=fract(p), g=floor(p); float rnd=hash(g); vec3 q;
+  if      (rnd<0.125) q=f;
+  else if (rnd<0.250) q=vec3(f.x,1.0-f.y,f.z);
+  else if (rnd<0.375) q=vec3(1.0-f.x,f.y,f.z);
+  else if (rnd<0.500) q=vec3(1.0-f.x,1.0-f.y,f.z);
+  else if (rnd<0.625) q=vec3(f.y,f.x,1.0-f.z);
+  else if (rnd<0.750) q=vec3(f.y,1.0-f.x,1.0-f.z);
+  else if (rnd<0.875) q=vec3(1.0-f.y,f.x,1.0-f.z);
+  else                q=vec3(1.0-f.y,1.0-f.x,1.0-f.z);
   return cell(q);
 }
-
-vec3 normal(vec3 p) {
-  float e = 0.0005;
-  float h = SDF(p);
-  return normalize(vec3(
-    SDF(p + vec3(e, 0, 0)) - h,
-    SDF(p + vec3(0, e, 0)) - h,
-    SDF(p + vec3(0, 0, e)) - h
-  ));
-}
-
-void main() {
-  vec3 ro = Ro;
-  vec3 rd = normalize(vRd);
-
-  float t = 0.0;
-  float steps = -1.0;
-  for (int j = 0; j < MAX_STEPS; j++) {
-    vec3 p = ro + rd * t;
-    float d = SDF(p);
-    if (d < SURF_EPS) { steps = float(j); break; }
-    t += max(d, 0.0005);
-    if (t > MAX_DIST) { steps = float(MAX_STEPS); break; }
-  }
-
+vec3 nrm(vec3 p){ float e=0.0005; float h=SDF(p); return normalize(vec3(SDF(p+vec3(e,0,0))-h, SDF(p+vec3(0,e,0))-h, SDF(p+vec3(0,0,e))-h)); }
+vec3 shade(vec3 ro, vec3 rd){
+  float t=0.0, steps=-1.0;
+  for(int j=0;j<MAX_STEPS;j++){ vec3 p=ro+rd*t; float d=SDF(p); if(d<SURF_EPS){steps=float(j);break;} t+=max(d,0.0005); if(t>MAX_DIST){steps=float(MAX_STEPS);break;} }
   vec3 col;
-  if (steps < 0.0) {
-    col = vec3(0.02);
-  } else if (steps >= float(MAX_STEPS) - 0.5) {
-    col = vec3(0.015) + 0.008 * rd;
-  } else {
-    vec3 p = ro + rd * t;
-    vec3 n = normal(p);
-    float ao   = 1.0 - steps / float(MAX_STEPS);
-    float fres = pow(clamp(1.0 - abs(dot(n, -rd)), 0.0, 1.0), 2.0);
-    vec3 base  = (cos(p * 0.5) + 2.0) / 3.0;
-    col = base * (ao * 0.75 + fres * 0.6) + 0.03;
-  }
-
-  gl_FragColor = vec4(col, 1.0);
+  if(steps<0.0) col=vec3(0.02);
+  else if(steps>=float(MAX_STEPS)-0.5) col=vec3(0.015)+0.008*rd;
+  else { vec3 p=ro+rd*t; vec3 n=nrm(p); float ao=1.0-steps/float(MAX_STEPS); float fres=pow(clamp(1.0-abs(dot(n,-rd)),0.0,1.0),2.0); vec3 base=(cos(p*0.5)+2.0)/3.0; col=base*(ao*0.75+fres*0.6)+0.03; }
+  return col;
 }`;
+
+/* ---------- 2. Recursive cube tunnel ---------- */
+const BODY_CUBE = `
+#define DEPTH 10
+vec4 hash4(int n){ return fract(sin(vec4(532.894,392.843,402.942,837.098)*float(n+1))*4444.5); }
+void qrot(inout vec3 v, in vec4 q){ v += 2.0*cross(cross(v,q.xyz)+q.w*v, q.xyz); }
+vec3 cubeRayHit(in float r, in vec4 q, in vec3 c, in vec3 ori, in vec3 rd){
+  ori-=c; qrot(ori,q); qrot(rd,q);
+  vec3 h0=-(ori+sign(rd)*r)/rd; vec3 h1=-(ori-sign(rd)*r)/rd;
+  float t0=max(h0.x,max(h0.y,h0.z)); float t1=min(h1.x,min(h1.y,h1.z));
+  if(t1<t0) return vec3(-1.0); if(t0<1e-9) return vec3(-1.0);
+  float u=1.0; if(h0.y>h0.x) u=2.0; if(h0.z>max(h0.x,h0.y)) u=3.0;
+  vec3 hp=abs(ori+rd*t0); float d=r-min(max(hp.x,hp.y),min(max(hp.y,hp.z),max(hp.z,hp.x)));
+  return vec3(t0,u,d);
+}
+vec3 osc(in vec3 u){ u=mod(u,1.0)*4.0; return abs(u-2.0)-1.0; }
+int xorIdx(int a, int b){
+  if(b==1) return (a==0)?1:(a==1)?0:(a==2)?3:2;
+  if(b==2) return (a==0)?2:(a==1)?3:(a==2)?0:1;
+  return     (a==0)?3:(a==1)?2:(a==2)?1:0;
+}
+vec4 getBack(int idx, float col){ if(idx==1) return vec4(col,0.,0.,1.); if(idx==2) return vec4(0.,col,0.,1.); if(idx==3) return vec4(0.,0.,col,1.); return vec4(0.,0.,0.,1.); }
+vec4 getEdge(int idx){ if(idx==1) return vec4(1.,0.,0.,1.); if(idx==2) return vec4(0.,1.,0.,1.); if(idx==3) return vec4(0.,0.,1.,1.); return vec4(1.,1.,1.,1.); }
+vec3 shade(vec3 ro, vec3 rd){
+  vec4 fragColor=vec4(0.0); int idx=0; int ri=0;
+  for(int d=0; d<DEPTH; d++){
+    float col=0.2; float t=T*0.2;
+    vec4 u=normalize(hash4(ri)); vec4 v=vec4(hash4(ri+1)); v=normalize(v-dot(v,u)*u);
+    vec4 q=cos(t)*u+sin(t)*v; float r=pow(0.5,float(d))*0.5;
+    vec3 c=(0.5-r)*osc(t+hash4(ri+2).xyz)*0.3;
+    vec3 hit=cubeRayHit(r,q,c,ro,rd); int face=int(hit.y+0.5);
+    if(hit.y<-0.5){ fragColor=getBack(idx,col); break; }
+    if(hit.z<0.02*r){ idx=xorIdx(idx,face); fragColor=getEdge(idx); break; }
+    else if(d==DEPTH-1){ idx=xorIdx(idx,face); fragColor=getBack(idx,col); }
+    else { idx=xorIdx(idx,face); ri=ri*3+face; }
+  }
+  return fragColor.rgb;
+}`;
+
+/* ---------- 3. IQ fractal (orbit trap) ---------- */
+const BODY_FRACTAL = `
+vec4 orb;
+float map(vec3 p, float s){
+  float scale=1.0; orb=vec4(1000.0);
+  for(int i=0;i<8;i++){ p=-1.0+2.0*fract(0.5*p+0.5); float r2=dot(p,p); orb=min(orb,vec4(abs(p),r2)); float k=s/r2; p*=k; scale*=k; }
+  return 0.25*abs(p.y)/scale;
+}
+float trace(vec3 ro, vec3 rd, float s){
+  float maxd=20.0, t=0.01;
+  for(int i=0;i<140;i++){ float precis=0.001*t; float h=map(ro+rd*t,s); if(h<precis||t>maxd) break; t+=h; }
+  if(t>maxd) t=-1.0; return t;
+}
+vec3 calcNormal(vec3 pos, float t, float s){
+  float precis=0.001*t; vec2 e=vec2(1.0,-1.0)*precis;
+  return normalize(e.xyy*map(pos+e.xyy,s)+e.yyx*map(pos+e.yyx,s)+e.yxy*map(pos+e.yxy,s)+e.xxx*map(pos+e.xxx,s));
+}
+vec3 render(vec3 ro, vec3 rd, float anim){
+  vec3 col=vec3(0.0); float t=trace(ro,rd,anim);
+  if(t>0.0){
+    vec4 tra=orb; vec3 pos=ro+t*rd; vec3 nor=calcNormal(pos,t,anim);
+    vec3 light1=vec3(0.577,0.577,-0.577), light2=vec3(-0.707,0.200,0.707);
+    float key=clamp(dot(light1,nor),0.0,1.0)*0.3;
+    float bac=clamp(0.2+0.8*dot(light2,nor),0.0,1.0);
+    float amb=0.7+0.15*nor.y; float ao=pow(clamp(tra.w*2.0,0.0,1.0),1.2);
+    vec3 brdf=vec3(0.40)*amb*ao; brdf+=vec3(1.00)*key*ao; brdf+=vec3(0.40)*bac*ao;
+    vec3 rgb=vec3(1.0);
+    rgb=mix(rgb,vec3(1.50,0.180,0.2),clamp(6.0*tra.y,0.0,1.0));
+    rgb=mix(rgb,vec3(1.0),pow(clamp(1.0-2.0*tra.y,0.0,1.0),8.0));
+    rgb=mix(rgb,vec3(0.25,0.35,1.50),pow(clamp(1.0-2.0*tra.z,0.0,1.0),8.0));
+    col=rgb*brdf*exp(-0.2*t);
+  }
+  return sqrt(col);
+}
+vec3 shade(vec3 ro, vec3 rd){
+  float anim = 1.1 + 0.7*smoothstep(-0.3,0.3,cos(0.1*T));
+  return render(ro, rd, anim);
+}`;
+
+/* ---------- 4. Volumetric tunnel ---------- */
+const BODY_VOLUMETRIC = `
+#define iterations 17
+#define formuparam 0.53
+#define volsteps 20
+#define stepsize 0.1
+#define tile   0.850
+#define brightness 0.0015
+#define darkmatter 0.300
+#define distfading 0.730
+#define saturation 0.850
+vec3 shade(vec3 ro, vec3 rd){
+  vec3 dir=rd, from=ro; float s=0.1, fade=1.0; vec3 v=vec3(0.0);
+  for(int r=0;r<volsteps;r++){
+    vec3 p=from+s*dir*0.5;
+    p=abs(vec3(tile)-mod(p,vec3(tile*2.0)));
+    float pa, a=pa=0.0;
+    for(int i=0;i<iterations;i++){
+      p=abs(p)/dot(p,p)-formuparam;
+      p.xy*=mat2(cos(T*0.02),sin(T*0.02),-sin(T*0.02),cos(T*0.02));
+      a+=abs(length(p)-pa); pa=length(p);
+    }
+    float dm=max(0.0,darkmatter-a*a*0.001); a*=a*a;
+    if(r>6) fade*=1.0-dm;
+    v+=fade; v+=vec3(s,s*s,s*s*s*s)*a*brightness*fade;
+    fade*=distfading; s+=stepsize;
+  }
+  v=mix(vec3(length(v)),v,saturation);
+  return v*0.01;
+}`;
+
+const SHADERS = [
+  { name: "Truchet Tunnel",    key: "1", body: BODY_TRUCHET,    home: { pos:[0.5,0.5,0.5], dir:[0,0,1]      } },
+  { name: "Recursive Cubes",   key: "2", body: BODY_CUBE,       home: { pos:[0.0,0.0,3.0], dir:[0,0,-1]     } },
+  { name: "IQ Fractal",        key: "3", body: BODY_FRACTAL,    home: { pos:[0.0,0.4,2.6], dir:[0,-0.15,-1] } },
+  { name: "Volumetric Tunnel", key: "4", body: BODY_VOLUMETRIC, home: { pos:[1.0,1.0,1.0], dir:[1,0.2,1]    } },
+];
+let activeShader = 0;
 
 /* ===================== compile & link ===================== */
 function makeShader(src, type) {
@@ -211,137 +299,142 @@ function makeShader(src, type) {
   gl.shaderSource(s, src);
   gl.compileShader(s);
   if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
-    console.error("Shader compile error:", gl.getShaderInfoLog(s));
+    console.error("Shader compile error:\n", gl.getShaderInfoLog(s), "\n", src);
     return null;
   }
   return s;
 }
 
-const vs = makeShader(VERT, gl.VERTEX_SHADER);
-const fs = makeShader(FRAG, gl.FRAGMENT_SHADER);
-if (!vs || !fs) {
-  document.body.innerHTML += '<div style="position:fixed;top:8px;left:8px;color:#f44;font:bold 14px monospace">SHADER ERROR — see console</div>';
-  throw "shader compile failed";
+function buildProgram(vertSrc, fragSrc) {
+  const vs = makeShader(vertSrc, gl.VERTEX_SHADER);
+  const fs = makeShader(fragSrc, gl.FRAGMENT_SHADER);
+  if (!vs || !fs) return null;
+  const p = gl.createProgram();
+  gl.attachShader(p, vs); gl.attachShader(p, fs); gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) { console.error("Link error:", gl.getProgramInfoLog(p)); return null; }
+  return p;
 }
 
-const prog = gl.createProgram();
-gl.attachShader(prog, vs);
-gl.attachShader(prog, fs);
-gl.linkProgram(prog);
-if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-  console.error("Link error:", gl.getProgramInfoLog(prog));
-  throw "link failed";
-}
-gl.useProgram(prog);
-
+// Full-screen quad ([-1,1] triangles), reused by every raymarch program.
 const buf = gl.createBuffer();
 gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
-  -1, -1,   1, -1,  -1,  1,
-  -1,  1,   1, -1,   1,  1
-]), gl.STATIC_DRAW);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]), gl.STATIC_DRAW);
 
-const aPos = gl.getAttribLocation(prog, "a_pos");
-gl.enableVertexAttribArray(aPos);
-gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
-
-const uT       = gl.getUniformLocation(prog, "T");
-const uRo      = gl.getUniformLocation(prog, "Ro");
-const uInvProj = gl.getUniformLocation(prog, "uInvProj");
-const uCamRot  = gl.getUniformLocation(prog, "uCamRot");
+// Build a GL program per shader.
+const progs = SHADERS.map(sh => {
+  const fragSrc = FRAG_HEAD + sh.body + FRAG_MAIN;
+  const prog = buildProgram(VERT, fragSrc);
+  if (!prog) {
+    document.body.innerHTML += '<div style="position:fixed;top:8px;left:8px;color:#f44;font:bold 14px monospace">SHADER ERROR ('+sh.name+') — see console</div>';
+    throw "shader build failed: " + sh.name;
+  }
+  return {
+    prog,
+    aPos:     gl.getAttribLocation(prog, "a_pos"),
+    uT:       gl.getUniformLocation(prog, "T"),
+    uRo:      gl.getUniformLocation(prog, "Ro"),
+    uInvProj: gl.getUniformLocation(prog, "uInvProj"),
+    uCamRot:  gl.getUniformLocation(prog, "uCamRot"),
+  };
+});
 
 gl.clearColor(0, 0, 0, 1);
 
 function drawView(invProj, camRot, ro, t) {
-  gl.uniform1f(uT, t);
-  gl.uniform3f(uRo, ro[0], ro[1], ro[2]);
-  gl.uniformMatrix4fv(uInvProj, false, invProj);
-  gl.uniformMatrix3fv(uCamRot, false, camRot);
+  const P = progs[activeShader];
+  gl.useProgram(P.prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.enableVertexAttribArray(P.aPos);
+  gl.vertexAttribPointer(P.aPos, 2, gl.FLOAT, false, 0, 0);
+  gl.uniform1f(P.uT, t);
+  gl.uniform3f(P.uRo, ro[0], ro[1], ro[2]);
+  gl.uniformMatrix4fv(P.uInvProj, false, invProj);
+  gl.uniformMatrix3fv(P.uCamRot, false, camRot);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
 }
 
 /* ===================================================================
-   Matrix / vector helpers (column-major, gl-matrix style)
+   Math helpers (column-major)
 =================================================================== */
 function perspective(fovy, aspect, near, far) {
   const f = 1 / Math.tan(fovy / 2);
   const nf = 1 / (near - far);
-  return new Float32Array([
-    f / aspect, 0, 0, 0,
-    0, f, 0, 0,
-    0, 0, (far + near) * nf, -1,
-    0, 0, 2 * far * near * nf, 0
-  ]);
+  return new Float32Array([ f/aspect,0,0,0, 0,f,0,0, 0,0,(far+near)*nf,-1, 0,0,2*far*near*nf,0 ]);
 }
-
 function invertMat4(m) {
   const out = new Float32Array(16);
-  const a00=m[0],a01=m[1],a02=m[2],a03=m[3];
-  const a10=m[4],a11=m[5],a12=m[6],a13=m[7];
-  const a20=m[8],a21=m[9],a22=m[10],a23=m[11];
-  const a30=m[12],a31=m[13],a32=m[14],a33=m[15];
-  const b00=a00*a11-a01*a10, b01=a00*a12-a02*a10, b02=a00*a13-a03*a10;
-  const b03=a01*a12-a02*a11, b04=a01*a13-a03*a11, b05=a02*a13-a03*a12;
-  const b06=a20*a31-a21*a30, b07=a20*a32-a22*a30, b08=a20*a33-a23*a30;
-  const b09=a21*a32-a22*a31, b10=a21*a33-a23*a31, b11=a22*a33-a23*a32;
-  let det = b00*b11-b01*b10+b02*b09+b03*b08-b04*b07+b05*b06;
-  if (!det) return out;
-  det = 1.0 / det;
-  out[0]=(a11*b11-a12*b10+a13*b09)*det;
-  out[1]=(a02*b10-a01*b11-a03*b09)*det;
-  out[2]=(a31*b05-a32*b04+a33*b03)*det;
-  out[3]=(a22*b04-a21*b05-a23*b03)*det;
-  out[4]=(a12*b08-a10*b11-a13*b07)*det;
-  out[5]=(a00*b11-a02*b08+a03*b07)*det;
-  out[6]=(a32*b02-a30*b05-a33*b01)*det;
-  out[7]=(a20*b05-a22*b02+a23*b01)*det;
-  out[8]=(a10*b10-a11*b08+a13*b06)*det;
-  out[9]=(a01*b08-a00*b10-a03*b06)*det;
-  out[10]=(a30*b04-a31*b02+a33*b00)*det;
-  out[11]=(a21*b02-a20*b04-a23*b00)*det;
-  out[12]=(a11*b07-a10*b09-a12*b06)*det;
-  out[13]=(a00*b09-a01*b07+a02*b06)*det;
-  out[14]=(a31*b01-a30*b03-a32*b00)*det;
-  out[15]=(a20*b03-a21*b01+a22*b00)*det;
+  const a00=m[0],a01=m[1],a02=m[2],a03=m[3], a10=m[4],a11=m[5],a12=m[6],a13=m[7];
+  const a20=m[8],a21=m[9],a22=m[10],a23=m[11], a30=m[12],a31=m[13],a32=m[14],a33=m[15];
+  const b00=a00*a11-a01*a10,b01=a00*a12-a02*a10,b02=a00*a13-a03*a10,b03=a01*a12-a02*a11,b04=a01*a13-a03*a11,b05=a02*a13-a03*a12;
+  const b06=a20*a31-a21*a30,b07=a20*a32-a22*a30,b08=a20*a33-a23*a30,b09=a21*a32-a22*a31,b10=a21*a33-a23*a31,b11=a22*a33-a23*a32;
+  let det=b00*b11-b01*b10+b02*b09+b03*b08-b04*b07+b05*b06; if(!det) return out; det=1.0/det;
+  out[0]=(a11*b11-a12*b10+a13*b09)*det; out[1]=(a02*b10-a01*b11-a03*b09)*det; out[2]=(a31*b05-a32*b04+a33*b03)*det; out[3]=(a22*b04-a21*b05-a23*b03)*det;
+  out[4]=(a12*b08-a10*b11-a13*b07)*det; out[5]=(a00*b11-a02*b08+a03*b07)*det; out[6]=(a32*b02-a30*b05-a33*b01)*det; out[7]=(a20*b05-a22*b02+a23*b01)*det;
+  out[8]=(a10*b10-a11*b08+a13*b06)*det; out[9]=(a01*b08-a00*b10-a03*b06)*det; out[10]=(a30*b04-a31*b02+a33*b00)*det; out[11]=(a21*b02-a20*b04-a23*b00)*det;
+  out[12]=(a11*b07-a10*b09-a12*b06)*det; out[13]=(a00*b09-a01*b07+a02*b06)*det; out[14]=(a31*b01-a30*b03-a32*b00)*det; out[15]=(a20*b03-a21*b01+a22*b00)*det;
   return out;
 }
-
-// out = a * b  (so (a*b)*v applies b first, then a)
 function mat4mul(a, b) {
   const out = new Float32Array(16);
-  for (let c = 0; c < 4; c++) {
-    const b0=b[c*4], b1=b[c*4+1], b2=b[c*4+2], b3=b[c*4+3];
-    out[c*4]   = a[0]*b0 + a[4]*b1 + a[8]*b2  + a[12]*b3;
-    out[c*4+1] = a[1]*b0 + a[5]*b1 + a[9]*b2  + a[13]*b3;
-    out[c*4+2] = a[2]*b0 + a[6]*b1 + a[10]*b2 + a[14]*b3;
-    out[c*4+3] = a[3]*b0 + a[7]*b1 + a[11]*b2 + a[15]*b3;
-  }
+  for (let c=0;c<4;c++){ const b0=b[c*4],b1=b[c*4+1],b2=b[c*4+2],b3=b[c*4+3];
+    out[c*4]=a[0]*b0+a[4]*b1+a[8]*b2+a[12]*b3; out[c*4+1]=a[1]*b0+a[5]*b1+a[9]*b2+a[13]*b3;
+    out[c*4+2]=a[2]*b0+a[6]*b1+a[10]*b2+a[14]*b3; out[c*4+3]=a[3]*b0+a[7]*b1+a[11]*b2+a[15]*b3; }
   return out;
 }
-
-function mat3FromMat4(m) {
-  return new Float32Array([ m[0],m[1],m[2], m[4],m[5],m[6], m[8],m[9],m[10] ]);
+function mat3FromMat4(m){ return new Float32Array([m[0],m[1],m[2], m[4],m[5],m[6], m[8],m[9],m[10]]); }
+function cross(a,b){ return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]; }
+function rotY(v,a){ const c=Math.cos(a),s=Math.sin(a); return [c*v[0]+s*v[2], v[1], -s*v[0]+c*v[2]]; }
+function playerMatrix(){
+  const c=Math.cos(playerYaw),s=Math.sin(playerYaw);
+  return new Float32Array([ c,0,-s,0, 0,1,0,0, s,0,c,0, playerPos[0],playerPos[1],playerPos[2],1 ]);
 }
 
-function cross(a, b) {
-  return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+/* ===================================================================
+   Shader switching — reframes both desktop & VR cameras to the
+   shader's "home" vantage point so each scene is well-composed.
+=================================================================== */
+function switchShader(i) {
+  if (i < 0 || i >= SHADERS.length) return;
+  activeShader = i;
+  const h = SHADERS[i].home;
+  camPos = h.pos.slice();
+  playerPos = h.pos.slice();
+
+  // Convert the look direction into each camera convention's angles.
+  // Desktop forward = [cp*sy, sp, cp*cy]; VR rig forward = [-sin, 0, -cos].
+  const d = h.dir;
+  const len = Math.hypot(d[0], d[1], d[2]) || 1;
+  const nx = d[0]/len, ny = d[1]/len, nz = d[2]/len;
+  yaw = Math.atan2(nx, nz);
+  pitch = Math.max(-1.5, Math.min(1.5, Math.asin(ny)));
+  playerYaw = Math.atan2(-nx, -nz);
+
+  updateMenuActive();
 }
 
-function rotY(v, a) {
-  const c = Math.cos(a), s = Math.sin(a);
-  return [c*v[0] + s*v[2], v[1], -s*v[0] + c*v[2]];
+/* ===================== desktop menu UI ===================== */
+const menuEl = document.getElementById("menu");
+const menuBtn = document.getElementById("menuBtn");
+function buildDesktopMenu() {
+  let html = '<div class="title">Shaders</div>';
+  SHADERS.forEach((s, i) => {
+    html += '<button data-i="'+i+'"><span>'+s.name+'</span><span class="key">'+s.key+'</span></button>';
+  });
+  menuEl.innerHTML = html;
+  menuEl.querySelectorAll("button").forEach(b => {
+    b.addEventListener("click", () => { switchShader(parseInt(b.dataset.i,10)); closeDesktopMenu(); });
+  });
+  updateMenuActive();
 }
-
-// Locomotion rig matrix: rotationY(playerYaw) with translation playerPos.
-function playerMatrix() {
-  const c = Math.cos(playerYaw), s = Math.sin(playerYaw);
-  return new Float32Array([
-    c, 0, -s, 0,
-    0, 1,  0, 0,
-    s, 0,  c, 0,
-    playerPos[0], playerPos[1], playerPos[2], 1
-  ]);
+function updateMenuActive() {
+  menuEl.querySelectorAll("button").forEach(b => {
+    b.classList.toggle("active", parseInt(b.dataset.i,10) === activeShader);
+  });
 }
+function toggleDesktopMenu(){ menuEl.classList.toggle("open"); }
+function closeDesktopMenu(){ menuEl.classList.remove("open"); }
+menuBtn.addEventListener("click", toggleDesktopMenu);
+buildDesktopMenu();
 
 /* ===================== desktop render loop ===================== */
 function startDesktopLoop() {
@@ -349,68 +442,189 @@ function startDesktopLoop() {
   lastNow = performance.now();
   desktopRAF = requestAnimationFrame(desktopFrame);
 }
-
 function desktopFrame(now) {
   if (mode !== "desktop") return;
   const dt = Math.min((now - lastNow) / 1000, 0.1);
   lastNow = now;
 
-  const cy = Math.cos(yaw), sy = Math.sin(yaw);
-  const cp = Math.cos(pitch), sp = Math.sin(pitch);
-  const fwd = [cp*sy, sp, cp*cy];
-  const rgt = [cy, 0, -sy];
+  const cy=Math.cos(yaw),sy=Math.sin(yaw), cp=Math.cos(pitch),sp=Math.sin(pitch);
+  const fwd=[cp*sy,sp,cp*cy], rgt=[cy,0,-sy];
+  let mf=0,ms=0,mu=0;
+  if(keys.has("w")) mf+=1; if(keys.has("s")) mf-=1;
+  if(keys.has("d")) ms+=1; if(keys.has("a")) ms-=1;
+  if(keys.has(" ")) mu+=1; if(keys.has("c")) mu-=1;
+  const speed=(keys.has("shift")?6.0:2.0)*dt;
+  camPos[0]+=(fwd[0]*mf+rgt[0]*ms)*speed;
+  camPos[1]+=(fwd[1]*mf+rgt[1]*ms+mu)*speed;
+  camPos[2]+=(fwd[2]*mf+rgt[2]*ms)*speed;
 
-  let mf = 0, ms = 0, mu = 0;
-  if (keys.has("w")) mf += 1;
-  if (keys.has("s")) mf -= 1;
-  if (keys.has("d")) ms += 1;
-  if (keys.has("a")) ms -= 1;
-  if (keys.has(" ")) mu += 1;
-  if (keys.has("c")) mu -= 1;
-  const speed = (keys.has("shift") ? 6.0 : 2.0) * dt;
-  camPos[0] += (fwd[0]*mf + rgt[0]*ms) * speed;
-  camPos[1] += (fwd[1]*mf + rgt[1]*ms + mu) * speed;
-  camPos[2] += (fwd[2]*mf + rgt[2]*ms) * speed;
-
-  const aspect = canvas.width / canvas.height;
-  const invProj = invertMat4(perspective(1.1, aspect, 0.01, 100));
-  const up = cross(rgt, fwd);
-  const camRot = new Float32Array([ rgt[0],rgt[1],rgt[2], up[0],up[1],up[2], -fwd[0],-fwd[1],-fwd[2] ]);
+  const aspect=canvas.width/canvas.height;
+  const invProj=invertMat4(perspective(1.1, aspect, 0.01, 100));
+  const up=cross(rgt,fwd);
+  const camRot=new Float32Array([rgt[0],rgt[1],rgt[2], up[0],up[1],up[2], -fwd[0],-fwd[1],-fwd[2]]);
 
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  gl.viewport(0, 0, canvas.width, canvas.height);
-  drawView(invProj, camRot, camPos, (now - t0) / 1000);
-
+  gl.viewport(0,0,canvas.width,canvas.height);
+  drawView(invProj, camRot, camPos, (now - t0)/1000);
   desktopRAF = requestAnimationFrame(desktopFrame);
 }
 
 /* ===================================================================
-   WebXR — immersive VR for Quest 3
+   In-VR shader menu
+   A 2D canvas is drawn to a texture and shown on a world-anchored quad
+   floating in front of the player. The right controller emits a ray;
+   where it crosses the panel plane highlights an entry, and the trigger
+   selects it. B/Y toggles the panel. This lets you change shaders (and
+   return to the "home" view of any scene) without ending the session.
 =================================================================== */
-let xrSession = null;
-let xrRefSpace = null;
-let lastXR = 0;
-let snapReady = true;
-const SNAP = Math.PI / 6;        // 30 degrees per flick
-const DEAD = 0.18;               // thumbstick dead zone
+let panelOpen = false;
+let panelTex = null;
+let panelCanvas = null, panelCtx = null;
+let panelProg = null, panelBuf = null, panelLoc = null;
+let panelMatrix = null;          // world transform of the panel quad
+let panelHover = -1;             // index currently pointed at
+const PANEL_W = 1.0, PANEL_H = 0.72;   // metres
+
+function initPanelGL() {
+  panelCanvas = document.createElement("canvas");
+  panelCanvas.width = 512; panelCanvas.height = 384;
+  panelCtx = panelCanvas.getContext("2d");
+
+  panelTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, panelTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+  const pv = `attribute vec2 a_pos; varying vec2 v_uv;
+    uniform mat4 uMVP;
+    void main(){ v_uv=vec2(a_pos.x*0.5+0.5, 0.5-a_pos.y*0.5);
+      gl_Position = uMVP * vec4(a_pos.x*${(PANEL_W/2).toFixed(3)}, a_pos.y*${(PANEL_H/2).toFixed(3)}, 0.0, 1.0); }`;
+  const pf = `precision mediump float; varying vec2 v_uv; uniform sampler2D uTex;
+    void main(){ vec4 c=texture2D(uTex, v_uv); if(c.a<0.01) discard; gl_FragColor=c; }`;
+  panelProg = buildProgram(pv, pf);
+  panelBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, panelBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]), gl.STATIC_DRAW);
+  panelLoc = {
+    aPos: gl.getAttribLocation(panelProg, "a_pos"),
+    uMVP: gl.getUniformLocation(panelProg, "uMVP"),
+    uTex: gl.getUniformLocation(panelProg, "uTex"),
+  };
+}
+
+function drawPanelTexture() {
+  const ctx = panelCtx, W = panelCanvas.width, H = panelCanvas.height;
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle = "rgba(8,10,18,0.92)";
+  roundRect(ctx, 4, 4, W-8, H-8, 18); ctx.fill();
+  ctx.strokeStyle = "rgba(80,110,190,0.7)"; ctx.lineWidth = 2;
+  roundRect(ctx, 4, 4, W-8, H-8, 18); ctx.stroke();
+
+  ctx.fillStyle = "#7e8db5";
+  ctx.font = "600 22px system-ui, sans-serif";
+  ctx.textBaseline = "middle";
+  ctx.fillText("SELECT SHADER", 32, 40);
+
+  const rowH = 58, top = 78;
+  SHADERS.forEach((s, i) => {
+    const y = top + i*rowH;
+    const hovered = (i === panelHover);
+    const active = (i === activeShader);
+    if (hovered || active) {
+      ctx.fillStyle = hovered ? "rgba(23,105,255,0.85)" : "rgba(40,52,86,0.7)";
+      roundRect(ctx, 24, y, W-48, rowH-12, 12); ctx.fill();
+    }
+    ctx.fillStyle = (hovered || active) ? "#ffffff" : "#cdd6ea";
+    ctx.font = "600 24px system-ui, sans-serif";
+    ctx.fillText(s.name, 44, y + (rowH-12)/2);
+    if (active) {
+      ctx.fillStyle = hovered ? "#ffffff" : "#3b82ff";
+      ctx.font = "600 18px system-ui, sans-serif";
+      ctx.fillText("● active", W-150, y + (rowH-12)/2);
+    }
+  });
+
+  ctx.fillStyle = "#5a687f";
+  ctx.font = "400 16px system-ui, sans-serif";
+  ctx.fillText("point + trigger to select   ·   B/Y to close", 32, H-28);
+
+  gl.bindTexture(gl.TEXTURE_2D, panelTex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, panelCanvas);
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.arcTo(x+w, y,   x+w, y+h, r);
+  ctx.arcTo(x+w, y+h, x,   y+h, r);
+  ctx.arcTo(x,   y+h, x,   y,   r);
+  ctx.arcTo(x,   y,   x+w, y,   r);
+  ctx.closePath();
+}
+
+// Place the panel ~1.4 m in front of the player's current facing.
+function positionPanel() {
+  const f = rotY([0,0,-1], playerYaw);
+  const cx = playerPos[0] + f[0]*1.4;
+  const cy = playerPos[1];
+  const cz = playerPos[2] + f[2]*1.4;
+  const c = Math.cos(playerYaw), s = Math.sin(playerYaw);
+  // Quad faces the player (normal = -f). Columns: right, up, normal, translation.
+  panelMatrix = new Float32Array([
+    c,0,-s,0,
+    0,1,0,0,
+    s,0,c,0,
+    cx,cy,cz,1
+  ]);
+}
+
+// Ray/plane intersection in panel local space -> hovered row index, or -1.
+function panelPick(orig, dir) {
+  if (!panelMatrix) return -1;
+  const inv = invertMat4(panelMatrix);
+  const lo = applyMat4Point(inv, orig);
+  const ld = applyMat4Dir(inv, dir);
+  if (Math.abs(ld[2]) < 1e-5) return -1;
+  const t = -lo[2] / ld[2];
+  if (t < 0) return -1;
+  const hx = lo[0] + ld[0]*t;
+  const hy = lo[1] + ld[1]*t;
+  if (Math.abs(hx) > PANEL_W/2 || Math.abs(hy) > PANEL_H/2) return -1;
+  // Map local y (top=+H/2) to canvas rows.
+  const u = (0.5 - hy/PANEL_H);          // 0 at top, 1 at bottom
+  const py = u * panelCanvas.height;
+  const rowH = 58, top = 78;
+  const idx = Math.floor((py - top) / rowH);
+  return (idx >= 0 && idx < SHADERS.length) ? idx : -1;
+}
+function applyMat4Point(m,v){ return [ m[0]*v[0]+m[4]*v[1]+m[8]*v[2]+m[12], m[1]*v[0]+m[5]*v[1]+m[9]*v[2]+m[13], m[2]*v[0]+m[6]*v[1]+m[10]*v[2]+m[14] ]; }
+function applyMat4Dir(m,v){ return [ m[0]*v[0]+m[4]*v[1]+m[8]*v[2], m[1]*v[0]+m[5]*v[1]+m[9]*v[2], m[2]*v[0]+m[6]*v[1]+m[10]*v[2] ]; }
+
+function openPanel(){ panelOpen = true; positionPanel(); }
+function closePanel(){ panelOpen = false; panelHover = -1; }
+
+/* ===================================================================
+   WebXR session
+=================================================================== */
+let xrSession = null, xrRefSpace = null;
+let lastXR = 0, snapReady = true;
+let menuBtnReady = true, triggerReady = true;
+const SNAP = Math.PI/6, DEAD = 0.18;
 const vrBtn = document.getElementById("vr");
 
-function dead(v) {
-  return Math.abs(v) < DEAD ? 0 : (v - Math.sign(v) * DEAD) / (1 - DEAD);
-}
+function dead(v){ return Math.abs(v) < DEAD ? 0 : (v - Math.sign(v)*DEAD)/(1-DEAD); }
 
 if (navigator.xr) {
   navigator.xr.isSessionSupported("immersive-vr").then(ok => {
     vrBtn.style.display = "block";
-    if (ok) {
-      vrBtn.onclick = enterVR;
-    } else {
-      vrBtn.textContent = "VR not available";
-      vrBtn.disabled = true;
-    }
-  }).catch(() => {});
+    if (ok) vrBtn.onclick = enterVR;
+    else { vrBtn.textContent = "VR not available"; vrBtn.disabled = true; }
+  }).catch(()=>{});
 } else {
-  console.warn("WebXR not found. Serve this over HTTPS (or localhost) and open it in the Quest 3 browser.");
+  console.warn("WebXR unavailable. Serve over HTTPS and open in the Quest 3 browser.");
 }
 
 async function enterVR() {
@@ -420,124 +634,157 @@ async function enterVR() {
       requiredFeatures: ["local-floor"],
       optionalFeatures: ["bounded-floor"]
     });
-
-    const layer = new XRWebGLLayer(xrSession, gl, {
-      antialias: false,
-      depth: false,
-      framebufferScaleFactor: 0.7   // raymarching is heavy; trade a little sharpness for frame rate
-    });
+    const layer = new XRWebGLLayer(xrSession, gl, { antialias:false, depth:false, framebufferScaleFactor: VR_RES });
     xrSession.updateRenderState({ baseLayer: layer });
-
     xrRefSpace = await xrSession.requestReferenceSpace("local-floor");
-
+    if (!panelTex) initPanelGL();
     xrSession.addEventListener("end", onXREnd);
-
     mode = "xr";
     if (desktopRAF) { cancelAnimationFrame(desktopRAF); desktopRAF = null; }
     vrBtn.textContent = "In VR…";
-    lastXR = 0;
+    lastXR = 0; closePanel();
     xrSession.requestAnimationFrame(onXRFrame);
   } catch (err) {
     console.error("Failed to start VR session:", err);
     vrBtn.textContent = "VR failed — see console";
   }
 }
-
 function onXREnd() {
-  xrSession = null;
-  xrRefSpace = null;
-  mode = "desktop";
-  vrBtn.textContent = "Enter VR";
-  vrBtn.disabled = false;
-  resize();
-  startDesktopLoop();
+  xrSession = null; xrRefSpace = null; mode = "desktop";
+  vrBtn.textContent = "Enter VR"; vrBtn.disabled = false;
+  resize(); startDesktopLoop();
 }
 
 function snapTurn(delta, headLocal) {
-  // Rotate the rig about the player's own head so the view pivots in place.
   const before = rotY(headLocal, playerYaw);
   playerYaw += delta;
   const after = rotY(headLocal, playerYaw);
-  playerPos[0] += before[0] - after[0];
-  playerPos[1] += before[1] - after[1];
-  playerPos[2] += before[2] - after[2];
+  playerPos[0] += before[0]-after[0];
+  playerPos[1] += before[1]-after[1];
+  playerPos[2] += before[2]-after[2];
 }
 
-function updateXRInput(session, pose, headWorld, dt) {
-  let mf = 0, ms = 0, mu = 0, rsx = 0, boost = false;
+// Build a controller's world ray from its pose (composed onto the rig).
+function controllerRay(frame, src) {
+  if (!src.targetRaySpace) return null;
+  const p = frame.getPose(src.targetRaySpace, xrRefSpace);
+  if (!p) return null;
+  const world = mat4mul(playerMatrix(), p.transform.matrix);
+  const orig = [world[12], world[13], world[14]];
+  const dir  = [-world[8], -world[9], -world[10]];   // -Z forward
+  return { orig, dir };
+}
+
+function updateXRInput(session, frame, pose, headWorld, dt) {
+  let mf=0, ms=0, mu=0, rsx=0, boost=false;
+  let menuPressed=false, triggerPressed=false, rightRay=null;
 
   for (const src of session.inputSources) {
-    const gp = src.gamepad;
-    if (!gp) continue;
+    const gp = src.gamepad; if (!gp) continue;
     const ax = gp.axes;
-    let sx = 0, sy = 0;
-    if (ax.length >= 4)      { sx = ax[2]; sy = ax[3]; }  // xr-standard thumbstick
-    else if (ax.length >= 2) { sx = ax[0]; sy = ax[1]; }  // fallback
-    sx = dead(sx); sy = dead(sy);
-
-    const trig = (gp.buttons[0] && gp.buttons[0].pressed) ||
-                 (gp.buttons[1] && gp.buttons[1].pressed);
-    if (trig) boost = true;
+    let sx=0, sy=0;
+    if (ax.length>=4){ sx=ax[2]; sy=ax[3]; } else if (ax.length>=2){ sx=ax[0]; sy=ax[1]; }
+    sx=dead(sx); sy=dead(sy);
+    const trig = gp.buttons[0] && gp.buttons[0].pressed;
+    if ((gp.buttons[1] && gp.buttons[1].pressed)) boost = true;
+    // A/X = buttons[4], B/Y = buttons[5] on xr-standard
+    const by = gp.buttons[5] && gp.buttons[5].pressed;
+    if (by) menuPressed = true;
 
     if (src.handedness === "right") {
-      rsx = sx;          // snap turn
-      mu += -sy;         // vertical fly
-    } else {             // left or unknown
-      mf += -sy;         // forward/back along head gaze
-      ms += sx;          // strafe
+      rsx = sx; mu += -sy;
+      rightRay = controllerRay(frame, src);
+      if (trig) triggerPressed = true;
+    } else {
+      mf += -sy; ms += sx;
+      if (trig) boost = true;   // left trigger also boosts
     }
   }
 
-  // Comfort-oriented snap turn with edge detection.
-  if (Math.abs(rsx) > 0.7 && snapReady) {
-    const head = pose.transform.position;
-    snapTurn(rsx > 0 ? -SNAP : SNAP, [head.x, head.y, head.z]);
-    snapReady = false;
-  } else if (Math.abs(rsx) < 0.3) {
-    snapReady = true;
+  // Toggle the in-VR panel (edge-triggered).
+  if (menuPressed && menuBtnReady) { panelOpen ? closePanel() : openPanel(); menuBtnReady = false; }
+  else if (!menuPressed) menuBtnReady = true;
+
+  if (panelOpen) {
+    // While the panel is open, the right controller drives selection.
+    if (rightRay) panelHover = panelPick(rightRay.orig, rightRay.dir);
+    if (triggerPressed && triggerReady) {
+      if (panelHover >= 0) { switchShader(panelHover); closePanel(); }
+      triggerReady = false;
+    } else if (!triggerPressed) triggerReady = true;
+    return; // freeze locomotion while choosing
   }
 
-  // Movement directions taken from the head pose in scene space.
-  const fwd = [-headWorld[8], -headWorld[9], -headWorld[10]];
-  const right = [headWorld[0], headWorld[1], headWorld[2]];
-  const speed = (boost ? 6.0 : 2.0) * dt;
-  playerPos[0] += (fwd[0]*mf + right[0]*ms) * speed;
-  playerPos[1] += (fwd[1]*mf + right[1]*ms + mu) * speed;
-  playerPos[2] += (fwd[2]*mf + right[2]*ms) * speed;
+  // Snap turn.
+  if (Math.abs(rsx) > 0.7 && snapReady) {
+    const h = pose.transform.position;
+    snapTurn(rsx>0 ? -SNAP : SNAP, [h.x,h.y,h.z]);
+    snapReady = false;
+  } else if (Math.abs(rsx) < 0.3) snapReady = true;
+
+  const fwd=[-headWorld[8],-headWorld[9],-headWorld[10]];
+  const right=[headWorld[0],headWorld[1],headWorld[2]];
+  const speed=(boost?6.0:2.0)*dt;
+  playerPos[0]+=(fwd[0]*mf+right[0]*ms)*speed;
+  playerPos[1]+=(fwd[1]*mf+right[1]*ms+mu)*speed;
+  playerPos[2]+=(fwd[2]*mf+right[2]*ms)*speed;
+}
+
+function drawPanel(viewProj) {
+  drawPanelTexture();
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  gl.useProgram(panelProg);
+  gl.bindBuffer(gl.ARRAY_BUFFER, panelBuf);
+  gl.enableVertexAttribArray(panelLoc.aPos);
+  gl.vertexAttribPointer(panelLoc.aPos, 2, gl.FLOAT, false, 0, 0);
+  const mvp = mat4mul(viewProj, panelMatrix);
+  gl.uniformMatrix4fv(panelLoc.uMVP, false, mvp);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, panelTex);
+  gl.uniform1i(panelLoc.uTex, 0);
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+  gl.disable(gl.BLEND);
 }
 
 function onXRFrame(time, frame) {
   const session = frame.session;
   session.requestAnimationFrame(onXRFrame);
-
-  const dt = lastXR ? Math.min((time - lastXR) / 1000, 0.1) : 0;
+  const dt = lastXR ? Math.min((time-lastXR)/1000, 0.1) : 0;
   lastXR = time;
 
   const pose = frame.getViewerPose(xrRefSpace);
   if (!pose) return;
 
-  // Compose head pose onto the locomotion rig, then read the sticks.
   const headWorld = mat4mul(playerMatrix(), pose.transform.matrix);
-  updateXRInput(session, pose, headWorld, dt);
+  updateXRInput(session, frame, pose, headWorld, dt);
 
-  const rig = playerMatrix();   // refreshed after this frame's movement/turn
+  const rig = playerMatrix();
   const layer = session.renderState.baseLayer;
   gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
   gl.clear(gl.COLOR_BUFFER_BIT);
 
-  const t = time / 1000;
+  const t = time/1000;
   for (const view of pose.views) {
     const vp = layer.getViewport(view);
     gl.viewport(vp.x, vp.y, vp.width, vp.height);
 
-    const worldMat = mat4mul(rig, view.transform.matrix);  // eye -> scene
+    const worldMat = mat4mul(rig, view.transform.matrix);   // eye -> scene
     const invProj  = invertMat4(view.projectionMatrix);
     const camRot   = mat3FromMat4(worldMat);
-    drawView(invProj, camRot, [worldMat[12], worldMat[13], worldMat[14]], t);
+    drawView(invProj, camRot, [worldMat[12],worldMat[13],worldMat[14]], t);
+
+    if (panelOpen) {
+      // viewProj = projection * inverse(eyeWorld)
+      const viewMat = invertMat4(worldMat);
+      const viewProj = mat4mul(view.projectionMatrix, viewMat);
+      drawPanel(viewProj);
+    }
   }
 }
 
 /* ===================== go ===================== */
+switchShader(0);
 startDesktopLoop();
 </script>
 </body>

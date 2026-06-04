@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Volumetric Tunnel 3D</title>
+<style>
+  html,body{margin:0;padding:0;overflow:hidden;background:#000;font-family:system-ui,sans-serif}
+  canvas{display:block;width:100vw;height:100vh;cursor:crosshair}
+  #info{position:fixed;bottom:12px;left:50%;transform:translateX(-50%);color:#555;font-size:13px;pointer-events:none;text-align:center}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="info">drag=look &middot; scroll=move in facing direction &middot; F=fullscreen</div>
+<script>
+"use strict";
+const canvas = document.getElementById("c");
+const gl = canvas.getContext("webgl", {antialias:false, alpha:false})
+       || canvas.getContext("experimental-webgl");
+if (!gl) { document.body.innerHTML = '<div style="color:#fff;padding:40px">WebGL not supported.</div>'; throw "no gl"; }
+
+// --- camera (move in facing direction on scroll) ---
+let yaw = 0.0;
+let pitch = 0.0;
+let camX = 0.0;
+let camY = 0.0;
+let camZ = 0.0;
+let dragging = false;
+let lastX = 0, lastY = 0;
+
+canvas.addEventListener("mousedown", e => { dragging = true; lastX = e.clientX; lastY = e.clientY; });
+window.addEventListener("mouseup", () => { dragging = false; });
+window.addEventListener("mousemove", e => {
+  if (!dragging) return;
+  yaw   -= (e.clientX - lastX) * 0.005;
+  pitch -= (e.clientY - lastY) * 0.005;
+  pitch = Math.max(-1.4, Math.min(1.4, pitch));
+  lastX = e.clientX; lastY = e.clientY;
+});
+
+canvas.addEventListener("wheel", e => {
+  const cy = Math.cos(yaw), sy = Math.sin(yaw);
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  const fx = cp * sy;
+  const fy = sp;
+  const fz = cp * cy;
+  const amt = e.deltaY * 0.015;
+  camX += fx * amt;
+  camY += fy * amt;
+  camZ += fz * amt;
+  e.preventDefault();
+}, {passive: true});
+
+window.addEventListener("keydown", e => {
+  if (e.key === "f" || e.key === "F") {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else document.body.requestFullscreen().catch(()=>{});
+  }
+});
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+  canvas.width  = Math.floor(window.innerWidth  * dpr);
+  canvas.height = Math.floor(window.innerHeight * dpr);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+}
+window.addEventListener("resize", resize);
+resize();
+
+// --- shader ---
+const VERT = `attribute vec2 a_pos;
+void main() { gl_Position = vec4(a_pos, 0.0, 1.0); }`;
+
+const FRAG = `
+precision highp float;
+
+uniform float T;
+uniform vec2  R;
+uniform vec2  YP;
+uniform vec3  CamPos;
+
+#define iterations 17
+#define formuparam 0.53
+#define volsteps 20
+#define stepsize 0.1
+#define zoom   0.800
+#define tile   0.850
+#define brightness 0.0015
+#define darkmatter 0.300
+#define distfading 0.730
+#define saturation 0.850
+#define pi 3.14159
+
+float mytanh(float x) {
+  return (exp(2.0*x) - 1.0) / (exp(2.0*x) + 1.0);
+}
+#define thc(a,b) (abs(a) < 0.001 ? cos(b) : mytanh((a)*cos(b))/mytanh(a))
+#define ths(a,b) (abs(a) < 0.001 ? sin(b) : mytanh((a)*sin(b))/mytanh(a))
+#define sabs(x) sqrt(x*x+1e-2)
+
+float cc(float a, float b) {
+  float f = thc(a, b);
+  return sign(f) * pow(abs(f), 0.25);
+}
+float cs(float a, float b) {
+  float f = ths(a, b);
+  return sign(f) * pow(abs(f), 0.25);
+}
+vec3 pal(in float t, in vec3 a, in vec3 b, in vec3 c, in vec3 d) {
+  return a + b*cos(6.28318*(c*t+d));
+}
+float h21(vec2 a) {
+  return fract(sin(dot(a.xy, vec2(1., 10.233))) * 40000.5453123);
+}
+float mlength(vec2 uv) {
+  return max(abs(uv.x), abs(uv.y));
+}
+float mlength(vec3 uv) {
+  return max(max(abs(uv.x), abs(uv.y)), abs(uv.z));
+}
+float smin(float a, float b) {
+  float k = 0.12;
+  float h = clamp(0.5 + 0.5 * (b-a) / k, 0.0, 1.0);
+  return mix(b, a, h) - k * h * (1.0 - h);
+}
+float sdSegment(in vec2 p, in vec2 a, in vec2 b) {
+  vec2 pa = p-a, ba = b-a;
+  float h = clamp(dot(pa,ba)/dot(ba,ba), 0.0, 1.0);
+  return length(pa - ba*h);
+}
+float sdEllipse(in vec2 p, in vec2 ab) {
+  p = abs(p); if(p.x > p.y) { p=p.yx; ab=ab.yx; }
+  float l = ab.y*ab.y - ab.x*ab.x;
+  float m = ab.x*p.x/l;      float m2 = m*m;
+  float n = ab.y*p.y/l;      float n2 = n*n;
+  float c = (m2+n2-1.0)/3.0; float c3 = c*c*c;
+  float q = c3 + m2*n2*2.0;
+  float d = c3 + m2*n2;
+  float g = m + m*n2;
+  float co;
+  if(d < 0.0) {
+    float h = acos(q/c3)/3.0;
+    float s = cos(h);
+    float t = sin(h)*sqrt(3.0);
+    float rx = sqrt(-c*(s+t+2.0) + m2);
+    float ry = sqrt(-c*(s-t+2.0) + m2);
+    co = (ry+sign(l)*rx+abs(g)/(rx*ry)-m)/2.0;
+  } else {
+    float h = 2.0*m*n*sqrt(d);
+    float s = sign(q+h)*pow(abs(q+h), 1.0/3.0);
+    float u = sign(q-h)*pow(abs(q-h), 1.0/3.0);
+    float rx = -s - u - c*4.0 + 2.0*m2;
+    float ry = (s-u)*sqrt(3.0);
+    float rm = sqrt(rx*rx + ry*ry);
+    co = (ry/sqrt(rm-rx)+2.0*g/rm-m)/2.0;
+  }
+  vec2 r = ab * vec2(co, sqrt(1.0-co*co));
+  return length(r-p) * sign(p.y-r.y);
+}
+float invs(float y) {
+  return 0.5 - sin(asin(1.0-2.0*y)/3.0);
+}
+float isBetween(float a, float b, float c) {
+  return smoothstep(-0.5, 0., -mod(c-a, 2.0*pi) + mod(b-a - 0.1*pi, 2.0*pi));
+}
+float ellipse(vec2 uv, vec2 p, vec2 q, float i) {
+  float quadTest = 0.5 * (sign(q.x - p.x) * sign(q.y - p.y) + 1.);
+  i = 1.0-quadTest;
+  vec2 c = (i == 1.0) ? vec2(p.x, q.y) : vec2(q.x, p.y);
+  float x = abs(q.x - p.x), y = abs(q.y - p.y);
+  float d = sdEllipse(uv - c, vec2(x, y));
+  float k = 1.0 / 800.0;  // fixed resolution-independent
+  float s = smoothstep(-k, k, -abs(d) + 0.006);
+  s = exp(-100.0 * abs(d));
+  float a1 = atan(p.x-c.x, p.y-c.y);
+  float a2 = atan(q.x-c.x, q.y-c.y);
+  float b = atan(uv.x-c.x, uv.y-c.y);
+  float as = isBetween(a1, a2, b);
+  return s;
+}
+
+void mainVR(out vec4 fragColor, in vec2 fragCoord, in vec3 ro, in vec3 rd) {
+  vec3 dir = rd;
+  vec3 from = ro;
+  float s = 0.1, fade = 1.0;
+  vec3 v = vec3(0.0);
+  for (int r = 0; r < volsteps; r++) {
+    vec3 p = from + s * dir * 0.5;
+    p = abs(vec3(tile) - mod(p, vec3(tile*2.0)));
+    float pa, a = pa = 0.0;
+    for (int i = 0; i < iterations; i++) {
+      p = abs(p) / dot(p, p) - formuparam;
+      p.xy *= mat2(cos(T*0.02), sin(T*0.02), -sin(T*0.02), cos(T*0.02));
+      a += abs(length(p) - pa);
+      pa = length(p);
+    }
+    float dm = max(0.0, darkmatter - a*a*0.001);
+    a *= a*a;
+    if (r > 6) fade *= 1.0 - dm;
+    v += fade;
+    v += vec3(s, s*s, s*s*s*s) * a * brightness * fade;
+    fade *= distfading;
+    s += stepsize;
+  }
+  v = mix(vec3(length(v)), v, saturation);
+  fragColor = vec4(v * 0.01, 1.0);
+}
+
+float happy_star(vec2 uv, float anim) {
+  uv = abs(uv);
+  vec2 pos = min(uv.xy/uv.yx, anim);
+  float p = (2.0 - pos.x - pos.y);
+  return (2.0 + p*(p*p-1.5)) / (uv.x + uv.y);
+}
+
+void main() {
+  // Use mainVR directly with camera from JS — no 2D overlay for clean 3D
+  vec2 uv = (2.0 * gl_FragCoord.xy - R) / length(R);
+
+  float cy = cos(YP.x), sy = sin(YP.x);
+  float cp = cos(YP.y), sp = sin(YP.y);
+  vec3 fwd = normalize(vec3(cp*sy, sp, cp*cy));
+  vec3 rgt = normalize(vec3(cy, 0.0, -sy));
+  vec3 up  = normalize(cross(rgt, fwd));
+  vec3 rd  = normalize(fwd + uv.x * rgt + uv.y * up);
+  vec3 ro  = CamPos;
+
+  mainVR(gl_FragColor, gl_FragCoord.xy, ro, rd);
+}
+`;
+
+function makeShader(src, type) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    console.error("Shader compile error:", gl.getShaderInfoLog(s));
+    return null;
+  }
+  return s;
+}
+
+const vs = makeShader(VERT, gl.VERTEX_SHADER);
+const fs = makeShader(FRAG, gl.FRAGMENT_SHADER);
+if (!vs || !fs) {
+  document.body.innerHTML += '<div style="position:fixed;top:8px;left:8px;color:#f44;font:bold 14px monospace">SHADER ERROR — see console (F12)</div>';
+  throw "shader compile failed";
+}
+
+const prog = gl.createProgram();
+gl.attachShader(prog, vs);
+gl.attachShader(prog, fs);
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+  console.error("Link error:", gl.getProgramInfoLog(prog));
+  throw "link failed";
+}
+gl.useProgram(prog);
+
+// Fullscreen quad
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+  -1, -1,   1, -1,  -1,  1,
+  -1,  1,   1, -1,   1,  1
+]), gl.STATIC_DRAW);
+
+const aPos = gl.getAttribLocation(prog, "a_pos");
+gl.enableVertexAttribArray(aPos);
+gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+// Uniforms
+const uT  = gl.getUniformLocation(prog, "T");
+const uR  = gl.getUniformLocation(prog, "R");
+const uYP = gl.getUniformLocation(prog, "YP");
+const uCP = gl.getUniformLocation(prog, "CamPos");
+
+// --- render loop ---
+const t0 = performance.now();
+(function loop() {
+  const t = (performance.now() - t0) / 1000.0;
+  gl.uniform1f(uT,  t);
+  gl.uniform2f(uR, canvas.width, canvas.height);
+  gl.uniform2f(uYP, yaw, pitch);
+  gl.uniform3f(uCP, camX, camY, camZ);
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
