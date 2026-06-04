@@ -186,14 +186,15 @@ function frame(time, xrFrame){
   if (!pose){ session.requestAnimationFrame(frame); return; }
   const layer = session.renderState.baseLayer;
   gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
+  const fbW = layer.framebufferWidth  || canvas.width;
   const fbH = layer.framebufferHeight || canvas.height;
   const v = (pose.views && pose.views[0]) ? pose.views[0] : null;
   if (!v){ session.requestAnimationFrame(frame); return; }
   const o = v.transform.orientation;
   const q = [o.x, o.y, o.z, o.w];
   const pos = [v.transform.position.x, v.transform.position.y, v.transform.position.z];
-  drawEyeFromPose(q, pos, false, canvas.width, fbH, time);
-  drawEyeFromPose(q, pos, true,  canvas.width, fbH, time);
+  drawEyeFromPose(q, pos, false, fbW, fbH, time);
+  drawEyeFromPose(q, pos, true,  fbW, fbH, time);
   session.requestAnimationFrame(frame);
 }
 
