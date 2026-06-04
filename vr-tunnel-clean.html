@@ -169,12 +169,16 @@ function qrot(q, v){
 // This uses the XR view's own viewport (not a manual split) so the
 // runtime routes the output to the correct eye display.
 function drawEye(view, vpWidth, vpHeight, time){
+  if (!view || !view.transform || !view.viewport) return;
   const vp = view.viewport;
   gl.viewport(vp.x, vp.y, vp.width, vp.height);
   const o = view.transform.orientation;
+  if (!o) return;
   const q = [o.x, o.y, o.z, o.w];
   const pos = view.transform.position;
-  const p = [pos.x, pos.y, pos.z];
+  const px = pos ? pos.x : 0;
+  const py = pos ? pos.y : 0;
+  const pz = pos ? pos.z : 0;
   const fwd = qrot(q, [0,0,-1]);
   const rgt = qrot(q, [1,0,0]);
   const up  = qrot(q, [0,1,0]);
@@ -184,7 +188,7 @@ function drawEye(view, vpWidth, vpHeight, time){
   gl.uniform3fv(uFwd, fwd);
   gl.uniform3fv(uRgt, rgt);
   gl.uniform3fv(uUp,  up);
-  gl.uniform3fv(uCP,  p);
+  gl.uniform3fv(uCP, [px, py, pz]);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
 }
 
@@ -199,16 +203,25 @@ function frame(time, xrFrame){
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
   const fbW = layer.framebufferWidth  || canvas.width;
   const fbH = layer.framebufferHeight || canvas.height;
-  // Use each view's own viewport — the runtime routes to the correct eye
-  for (let i = 0; i < pose.views.length; i++){
-    drawEye(pose.views[i], fbW, fbH, time);
-  }
-  // Fallback: if only one view, manually split left/right
-  if (pose.views.length < 2){
-    const v = pose.views[0];
+  const views = pose.views;
+  if (views.length >= 2){
+    // Multi-view: use each view's own viewport — runtime routes to correct eye
+    for (let i = 0; i < views.length; i++){
+      const v = views[i];
+      if (!v || !v.transform || !v.viewport) continue;
+      drawEye(v, fbW, fbH, time);
+    }
+  } else if (views.length === 1){
+    // Single view (Quest): manually split left/right with IPD offset
+    const v = views[0];
+    if (!v || !v.transform){ session.requestAnimationFrame(frame); return; }
     const o = v.transform.orientation;
+    if (!o){ session.requestAnimationFrame(frame); return; }
     const q = [o.x, o.y, o.z, o.w];
-    const pos = [v.transform.position.x, v.transform.position.y, v.transform.position.z];
+    const pos = v.transform.position;
+    const px = pos ? pos.x : 0;
+    const py = pos ? pos.y : 0;
+    const pz = pos ? pos.z : 0;
     const fwd = qrot(q, [0,0,-1]);
     const rgt = qrot(q, [1,0,0]);
     const up  = qrot(q, [0,1,0]);
@@ -222,13 +235,13 @@ function frame(time, xrFrame){
     gl.uniform3fv(uFwd, fwd);
     gl.uniform3fv(uRgt, rgt);
     gl.uniform3fv(uUp,  up);
-    gl.uniform3fv(uCP, [pos[0]-sep*rgt[0], pos[1]-sep*rgt[1], pos[2]-sep*rgt[2]]);
+    gl.uniform3fv(uCP, [px-sep*rgt[0], py-sep*rgt[1], pz-sep*rgt[2]]);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     // Right eye
     gl.viewport(half, 0, half, fbH);
     gl.uniform2f(uR, half, fbH);
     gl.uniform2f(uVP, half, 0);
-    gl.uniform3fv(uCP, [pos[0]+sep*rgt[0], pos[1]+sep*rgt[1], pos[2]+sep*rgt[2]]);
+    gl.uniform3fv(uCP, [px+sep*rgt[0], py+sep*rgt[1], pz+sep*rgt[2]]);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
   }
   session.requestAnimationFrame(frame);
