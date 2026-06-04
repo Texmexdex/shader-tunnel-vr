@@ -175,12 +175,16 @@ function drawEyeFromPose(q, pos, eyeRight, vpWidth, vpHeight, time){
   const up  = qrot(q, [0,1,0]);
   const sep = 0.032;
   const p = [pos[0] + (eyeRight?sep:-sep)*rgt[0], pos[1] + (eyeRight?sep:-sep)*rgt[1], pos[2] + (eyeRight?sep:-sep)*rgt[2]];
-  // Rotate forward toward the eye's positional offset so both eyes converge
+  // Converge: each eye's forward vector rotates inward so both eyes
+  // share a common fixation point ~2m ahead.  offR is +sep for right eye,
+  // -sep for left eye.  Adding offR * fwdScale to fwd pushes the ray
+  // toward the centerline.  fwdScale controls vergence strength.
   const offR = eyeRight ? sep : -sep;
+  const fwdScale = 3.0;
   const fwdC = [
-    fwd[0] + rgt[0] * offR * 0.75,
-    fwd[1] + rgt[1] * offR * 0.75,
-    fwd[2] + rgt[2] * offR * 0.75
+    fwd[0] + rgt[0] * offR * fwdScale,
+    fwd[1] + rgt[1] * offR * fwdScale,
+    fwd[2] + rgt[2] * offR * fwdScale
   ];
   gl.uniform1f(uT, time/1000);
   gl.uniform2f(uR, vp.width, vp.height);
