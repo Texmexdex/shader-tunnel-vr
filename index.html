@@ -35,7 +35,7 @@
 <button id="menuBtn" class="ui">Shaders &#9662;</button>
 <div id="menu" class="ui"></div>
 <div id="info" class="ui">
-  drag / click = look &middot; WASD = move &middot; space/C = up/down &middot; shift = boost &middot; 1-4 = switch &middot; M = menu &middot; F = fullscreen<br>
+  drag / click = look &middot; WASD = move &middot; space/C = up/down &middot; shift = boost &middot; 1-3 = switch &middot; M = menu &middot; F = fullscreen<br>
   VR (Quest 3): left stick = fly &middot; right stick = snap-turn + up/down &middot; trigger = boost &middot; B/Y = shader menu
 </div>
 <script>
@@ -49,7 +49,18 @@ const gl = canvas.getContext("webgl", {antialias:false, alpha:false, xrCompatibl
        || canvas.getContext("experimental-webgl", {antialias:false, alpha:false, xrCompatible:true});
 if (!gl) { document.body.innerHTML = '<div style="color:#fff;padding:40px">WebGL not supported.</div>'; throw "no gl"; }
 
-const VR_RES   = 1.0;   // VR framebuffer scale (1.0 = native eye buffer; lower = faster, higher = sharper)
+// Surface GPU context loss (e.g. a shader exceeding the driver watchdog on
+// high-resolution PCVR) instead of failing silently to a black screen.
+canvas.addEventListener("webglcontextlost", (e) => {
+  e.preventDefault();
+  console.error("WebGL context lost — the active shader likely exceeded the GPU budget. Try a lighter shader or lower VR_RES.");
+}, false);
+canvas.addEventListener("webglcontextrestored", () => {
+  console.warn("WebGL context restored. Reload the page to rebuild shader programs.");
+}, false);
+
+const VR_RES   = 0.9;   // global VR resolution multiplier (per-shader 'scale' multiplies this).
+                        // Raymarchers are fragment-bound, so >1.0 mostly just costs frame rate.
 const DPR_CAP  = 2.0;   // desktop max device-pixel-ratio
 
 /* Camera / locomotion state */
@@ -136,6 +147,7 @@ void main() {
 
 const FRAG_HEAD = `
 precision highp float;
+precision highp int;
 uniform float T;
 uniform vec3  Ro;
 varying vec3  vRd;
@@ -148,9 +160,9 @@ void main() {
 
 /* ---------- 1. Truchet tunnel ---------- */
 const BODY_TRUCHET = `
-#define MAX_STEPS 80
-#define MAX_DIST  40.0
-#define SURF_EPS  0.002
+#define MAX_STEPS 64
+#define MAX_DIST  30.0
+#define SURF_EPS  0.0025
 float hash(vec3 p){ p=fract(p*vec3(443.8975,441.4236,437.1954)); p+=dot(p,p.yzx+19.19); return fract((p.x+p.y)*p.z); }
 float arc(vec3 pos){ float r=length(pos.xy); float ax=pow(abs(r-0.5),8.0); float ay=pow(abs(pos.z-0.5),8.0); return pow(ax+ay,0.125)-0.08; }
 float cell(vec3 pos){ return min(min(arc(pos), arc(vec3(pos.z,1.0-pos.x,pos.y))), arc(vec3(1.0-pos.y,1.0-pos.z,pos.x))); }
@@ -220,12 +232,12 @@ const BODY_FRACTAL = `
 vec4 orb;
 float map(vec3 p, float s){
   float scale=1.0; orb=vec4(1000.0);
-  for(int i=0;i<8;i++){ p=-1.0+2.0*fract(0.5*p+0.5); float r2=dot(p,p); orb=min(orb,vec4(abs(p),r2)); float k=s/r2; p*=k; scale*=k; }
+  for(int i=0;i<7;i++){ p=-1.0+2.0*fract(0.5*p+0.5); float r2=max(dot(p,p),1e-4); orb=min(orb,vec4(abs(p),r2)); float k=s/r2; p*=k; scale*=k; }
   return 0.25*abs(p.y)/scale;
 }
 float trace(vec3 ro, vec3 rd, float s){
-  float maxd=20.0, t=0.01;
-  for(int i=0;i<140;i++){ float precis=0.001*t; float h=map(ro+rd*t,s); if(h<precis||t>maxd) break; t+=h; }
+  float maxd=12.0, t=0.01;
+  for(int i=0;i<90;i++){ float precis=0.0015*t; float h=map(ro+rd*t,s); if(h<precis||t>maxd) break; t+=h; }
   if(t>maxd) t=-1.0; return t;
 }
 vec3 calcNormal(vec3 pos, float t, float s){
@@ -254,42 +266,12 @@ vec3 shade(vec3 ro, vec3 rd){
   return render(ro, rd, anim);
 }`;
 
-/* ---------- 4. Volumetric tunnel ---------- */
-const BODY_VOLUMETRIC = `
-#define iterations 17
-#define formuparam 0.53
-#define volsteps 20
-#define stepsize 0.1
-#define tile   0.850
-#define brightness 0.0015
-#define darkmatter 0.300
-#define distfading 0.730
-#define saturation 0.850
-vec3 shade(vec3 ro, vec3 rd){
-  vec3 dir=rd, from=ro; float s=0.1, fade=1.0; vec3 v=vec3(0.0);
-  for(int r=0;r<volsteps;r++){
-    vec3 p=from+s*dir*0.5;
-    p=abs(vec3(tile)-mod(p,vec3(tile*2.0)));
-    float pa, a=pa=0.0;
-    for(int i=0;i<iterations;i++){
-      p=abs(p)/dot(p,p)-formuparam;
-      p.xy*=mat2(cos(T*0.02),sin(T*0.02),-sin(T*0.02),cos(T*0.02));
-      a+=abs(length(p)-pa); pa=length(p);
-    }
-    float dm=max(0.0,darkmatter-a*a*0.001); a*=a*a;
-    if(r>6) fade*=1.0-dm;
-    v+=fade; v+=vec3(s,s*s,s*s*s*s)*a*brightness*fade;
-    fade*=distfading; s+=stepsize;
-  }
-  v=mix(vec3(length(v)),v,saturation);
-  return v*0.01;
-}`;
+/* ---------- 4. Volumetric tunnel — removed (too dense for comfortable VR) ---------- */
 
 const SHADERS = [
-  { name: "Truchet Tunnel",    key: "1", body: BODY_TRUCHET,    home: { pos:[0.5,0.5,0.5], dir:[0,0,1]      } },
-  { name: "Recursive Cubes",   key: "2", body: BODY_CUBE,       home: { pos:[0.0,0.0,3.0], dir:[0,0,-1]     } },
-  { name: "IQ Fractal",        key: "3", body: BODY_FRACTAL,    home: { pos:[0.0,0.4,2.6], dir:[0,-0.15,-1] } },
-  { name: "Volumetric Tunnel", key: "4", body: BODY_VOLUMETRIC, home: { pos:[1.0,1.0,1.0], dir:[1,0.2,1]    } },
+  { name: "Truchet Tunnel",    key: "1", body: BODY_TRUCHET,    home: { pos:[0.5,0.5,0.5], dir:[0,0,1]      }, scale: 1.0  },
+  { name: "Recursive Cubes",   key: "2", body: BODY_CUBE,       home: { pos:[0.0,0.0,3.0], dir:[0,0,-1]     }, scale: 1.0  },
+  { name: "IQ Fractal",        key: "3", body: BODY_FRACTAL,    home: { pos:[0.0,0.4,2.6], dir:[0,-0.15,-1] }, scale: 0.7  },
 ];
 let activeShader = 0;
 
@@ -409,7 +391,21 @@ function switchShader(i) {
   pitch = Math.max(-1.5, Math.min(1.5, Math.asin(ny)));
   playerYaw = Math.atan2(-nx, -nz);
 
+  applyXRScale();
   updateMenuActive();
+}
+
+// In VR, re-create the base layer at the active shader's resolution scale.
+// Heavy shaders (fractal) render at a lower per-eye resolution so they stay
+// inside the GPU's per-frame budget — this is what prevents the PCVR black
+// screen, where the per-eye buffers are otherwise huge.
+function applyXRScale() {
+  if (mode !== "xr" || !xrSession) return;
+  const sc = (SHADERS[activeShader].scale || 1.0) * VR_RES;
+  try {
+    const layer = new XRWebGLLayer(xrSession, gl, { antialias:false, depth:false, framebufferScaleFactor: sc });
+    xrSession.updateRenderState({ baseLayer: layer });
+  } catch (e) { console.warn("XR scale update failed:", e); }
 }
 
 /* ===================== desktop menu UI ===================== */
@@ -634,7 +630,8 @@ async function enterVR() {
       requiredFeatures: ["local-floor"],
       optionalFeatures: ["bounded-floor"]
     });
-    const layer = new XRWebGLLayer(xrSession, gl, { antialias:false, depth:false, framebufferScaleFactor: VR_RES });
+    const sc0 = (SHADERS[activeShader].scale || 1.0) * VR_RES;
+    const layer = new XRWebGLLayer(xrSession, gl, { antialias:false, depth:false, framebufferScaleFactor: sc0 });
     xrSession.updateRenderState({ baseLayer: layer });
     xrRefSpace = await xrSession.requestReferenceSpace("local-floor");
     if (!panelTex) initPanelGL();
