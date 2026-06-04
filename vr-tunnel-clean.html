@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>XR Tunnel — single-view split</title>
+<style>
+  html,body{margin:0;padding:0;overflow:hidden;background:#000;font-family:system-ui,sans-serif}
+  #c{display:block;width:100vw;height:100vh}
+  #vr{position:fixed;top:12px;right:12px;padding:10px 14px;background:#fff;color:#000;border:none;border-radius:4px;cursor:pointer;font-weight:600;display:none;z-index:9}
+  #info{position:fixed;bottom:12px;left:0;right:0;color:#777;font-size:13px;pointer-events:none;text-align:center;opacity:.8}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<button id="vr">ENTER VR</button>
+<div id="info">drag=look &middot; F=fullscreen</div>
+<script>
+"use strict";
+const canvas = document.getElementById("c");
+const gl = canvas.getContext("webgl", {antialias:false, alpha:false});
+if (!gl) { document.body.innerHTML = '<div style="color:#fff;padding:40px">No WebGL</div>'; throw "no gl"; }
+
+let yaw=0, pitch=0, dragging=false, lx=0, ly=0;
+let session=null, refSpace=null;
+
+canvas.addEventListener("mousedown", e => { dragging=true; lx=e.clientX; ly=e.clientY; });
+window.addEventListener("mouseup", () => dragging=false);
+window.addEventListener("mousemove", e => {
+  if (!dragging) return;
+  yaw -= (e.clientX-lx)*0.005;
+  pitch -= (e.clientY-ly)*0.005;
+  pitch = Math.max(-1.4, Math.min(1.4, pitch));
+  lx=e.clientX; ly=e.clientY;
+});
+window.addEventListener("keydown", e => {
+  if (e.key.toLowerCase()==="f") { document.fullscreenElement ? document.exitFullscreen() : document.body.requestFullscreen().catch(()=>{}); }
+});
+function resize() {
+  if (session) return;
+  canvas.width = innerWidth; canvas.height = innerHeight;
+  gl.viewport(0,0,canvas.width,canvas.height);
+}
+addEventListener("resize", resize); resize();
+
+const vrBtn = document.getElementById("vr");
+if (navigator.xr) navigator.xr.isSessionSupported("immersive-vr").then(ok => { if (ok) vrBtn.style.display="block"; });
+vrBtn.addEventListener("click", async () => {
+  try {
+    session = await navigator.xr.requestSession("immersive-vr", {optionalFeatures:["local-floor"]});
+    vrBtn.textContent="LEAVE VR"; vrBtn.style.background="#f44"; vrBtn.style.color="#fff";
+    session.addEventListener("end", () => {
+      session=null; refSpace=null;
+      vrBtn.textContent="ENTER VR"; vrBtn.style.background="#fff"; vrBtn.style.color="#000"; resize();
+    });
+    await gl.makeXRCompatible();
+    refSpace = await session.requestReferenceSpace("local-floor");
+    const layer = new XRWebGLLayer(session, gl);
+    session.updateRenderState({baseLayer: layer});
+    session.requestAnimationFrame(frame);
+  } catch (err) { alert("XR: "+err.message); }
+});
+
+const VERT = `attribute vec2 a_pos; void main(){gl_Position=vec4(a_pos,0.,1.);}`;
+const FRAG = `
+precision highp float;
+uniform float T;
+uniform vec2  R;
+uniform vec3  EyeFwd;
+uniform vec3  EyeRgt;
+uniform vec3  EyeUp;
+uniform vec3  EyePos;
+
+#define MAX_STEPS 80
+#define MAX_DIST  40.0
+#define SURF_EPS 0.002
+
+float hash(vec3 p){
+  p = fract(p * vec3(443.8975, 441.4236, 437.1954));
+  p += dot(p, p.yzx + 19.19);
+  return fract((p.x + p.y) * p.z);
+}
+float arc(vec3 pos){
+  float r = length(pos.xy);
+  float ax = pow(abs(r - 0.5), 8.0);
+  float ay = pow(abs(pos.z - 0.5), 8.0);
+  return pow(ax + ay, 0.125) - 0.08;
+}
+float cell(vec3 pos){
+  return min(min(arc(pos), arc(vec3(pos.z, 1.0-pos.x, pos.y))), arc(vec3(1.0-pos.y, 1.0-pos.z, pos.x)));
+}
+float SDF(vec3 p){
+  vec3 f = fract(p);
+  vec3 g = floor(p);
+  float rnd = hash(g);
+  vec3 q;
+  if      (rnd < 0.125) q = f;
+  else if (rnd < 0.250) q = vec3(f.x,       1.0-f.y, f.z);
+  else if (rnd < 0.375) q = vec3(1.0-f.x,   f.y,      f.z);
+  else if (rnd < 0.500) q = vec3(1.0-f.x,   1.0-f.y, f.z);
+  else if (rnd < 0.625) q = vec3(f.y,        f.x,      1.0-f.z);
+  else if (rnd < 0.750) q = vec3(f.y,        1.0-f.x, 1.0-f.z);
+  else if (rnd < 0.875) q = vec3(1.0-f.y,   f.x,      1.0-f.z);
+  else                   q = vec3(1.0-f.y,   1.0-f.x, 1.0-f.z);
+  return cell(q);
+}
+vec3 calcN(vec3 p){
+  float e = 0.0005; float h = SDF(p);
+  return normalize(vec3(SDF(p+vec3(e,0,0))-h, SDF(p+vec3(0,e,0))-h, SDF(p+vec3(0,0,e))-h));
+}
+void main(){
+  vec2 uv = (2.0*gl_FragCoord.xy - R) / length(R);
+  vec3 ray = normalize(EyeFwd + uv.x*EyeRgt + uv.y*EyeUp);
+  vec3 ro = EyePos;
+  float t = 0.0, steps = -1.0;
+  for(int j=0; j<MAX_STEPS; j++){
+    float d = SDF(ro + ray*t);
+    if(d < SURF_EPS){ steps = float(j); break; }
+    t += max(d, 0.0005);
+    if(t > MAX_DIST){ steps = float(MAX_STEPS); break; }
+  }
+  vec3 col;
+  if(steps < 0.0){ col = vec3(0.02); }
+  else if(steps >= float(MAX_STEPS) - 0.5){ col = vec3(0.015) + 0.008*normalize(ray); }
+  else {
+    vec3 p = ro + ray*t;
+    vec3 n = calcN(p);
+    float ao = 1.0 - steps/float(MAX_STEPS);
+    float fres = pow(clamp(1.0 - abs(dot(n, -ray)), 0.0, 1.0), 2.0);
+    vec3 base = (cos(p*0.5) + 2.0)/3.0;
+    col = base*(ao*0.75 + fres*0.6) + 0.03;
+  }
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
+function makeShader(src, type){
+  const s = gl.createShader(type); gl.shaderSource(s,src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)){ console.error(gl.getShaderInfoLog(s)); return null; }
+  return s;
+}
+const vs2 = makeShader(VERT, gl.VERTEX_SHADER);
+const fs2 = makeShader(FRAG, gl.FRAGMENT_SHADER);
+if (!vs2||!fs2){ document.body.innerHTML += '<div style="position:fixed;top:8px;left:8px;color:#f44;font:bold 14px monospace">SHADER ERROR — see F12</div>'; throw "shader"; }
+const prog = gl.createProgram(); gl.attachShader(prog,vs2); gl.attachShader(prog,fs2); gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)){ console.error(gl.getProgramInfoLog(prog)); throw "link"; }
+gl.useProgram(prog);
+const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]), gl.STATIC_DRAW);
+const aP = gl.getAttribLocation(prog, "a_pos"); gl.enableVertexAttribArray(aP); gl.vertexAttribPointer(aP, 2, gl.FLOAT, false, 0, 0);
+
+const uT  = gl.getUniformLocation(prog, "T");
+const uR  = gl.getUniformLocation(prog, "R");
+const uFwd= gl.getUniformLocation(prog, "EyeFwd");
+const uRgt= gl.getUniformLocation(prog, "EyeRgt");
+const uUp = gl.getUniformLocation(prog, "EyeUp");
+const uCP = gl.getUniformLocation(prog, "EyePos");
+
+function qrot(q, v){
+  const t = [q[1]*v[2]-q[2]*v[1], q[2]*v[0]-q[0]*v[2], q[0]*v[1]-q[1]*v[0]];
+  const u = [t[0]+q[3]*v[0], t[1]+q[3]*v[1], t[2]+q[3]*v[2]];
+  const w = [q[1]*u[2]-q[2]*u[1], q[2]*u[0]-q[0]*u[2], q[0]*u[1]-q[1]*u[0]];
+  return [v[0]+2*w[0], v[1]+2*w[1], v[2]+2*w[2]];
+}
+
+// Render one eye. `eyeRight` chooses left/right half and IPD sign.
+function drawEyeFromPose(q, pos, eyeRight, vpWidth, vpHeight, time){
+  const fbW = canvas.width;
+  const half = fbW >> 1;
+  const vp = { x: eyeRight ? half : 0, y: 0, width: half, height: vpHeight };
+  gl.viewport(vp.x, vp.y, vp.width, vp.height);
+  const fwd = qrot(q, [0,0,-1]);
+  const rgt = qrot(q, [1,0,0]);
+  const up  = qrot(q, [0,1,0]);
+  const sep = 0.032;
+  const p = [pos[0] + (eyeRight?sep:-sep)*rgt[0], pos[1] + (eyeRight?sep:-sep)*rgt[1], pos[2] + (eyeRight?sep:-sep)*rgt[2]];
+  gl.uniform1f(uT, time/1000);
+  gl.uniform2f(uR, vp.width, vp.height);
+  gl.uniform3fv(uFwd, fwd);
+  gl.uniform3fv(uRgt, rgt);
+  gl.uniform3fv(uUp,  up);
+  gl.uniform3fv(uCP,  p);
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+}
+
+function frame(time, xrFrame){
+  const pose = xrFrame.getViewerPose(refSpace);
+  if (!pose){ session.requestAnimationFrame(frame); return; }
+  const layer = session.renderState.baseLayer;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
+  const fbH = layer.framebufferHeight || canvas.height;
+  const v = (pose.views && pose.views[0]) ? pose.views[0] : null;
+  if (!v){ session.requestAnimationFrame(frame); return; }
+  const o = v.transform.orientation;
+  const q = [o.x, o.y, o.z, o.w];
+  const pos = [v.transform.position.x, v.transform.position.y, v.transform.position.z];
+  drawEyeFromPose(q, pos, false, canvas.width, fbH, time);
+  drawEyeFromPose(q, pos, true,  canvas.width, fbH, time);
+  session.requestAnimationFrame(frame);
+}
+
+(function loop(now){
+  if (session) return;
+  gl.viewport(0,0,canvas.width,canvas.height);
+  gl.uniform1f(uT, now/1000);
+  gl.uniform2f(uR, canvas.width, canvas.height);
+  const cy=Math.cos(yaw), sy=Math.sin(yaw), cp=Math.cos(pitch), sp=Math.sin(pitch);
+  const fwd=[cp*sy, sp, cp*cy];
+  const rgt=[cy,0,-sy];
+  const up=[rgt[1]*fwd[2]-rgt[2]*fwd[1], rgt[2]*fwd[0]-rgt[0]*fwd[2], rgt[0]*fwd[1]-rgt[1]*fwd[0]];
+  gl.uniform3fv(uFwd, fwd);
+  gl.uniform3fv(uRgt, rgt);
+  gl.uniform3fv(uUp, up);
+  gl.uniform3fv(uCP, [0,0,3]);
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+  requestAnimationFrame(loop);
+})(performance.now());
+</script>
+</body>
+</html>
