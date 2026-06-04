@@ -65,6 +65,7 @@ const FRAG = `
 precision highp float;
 uniform float T;
 uniform vec2  R;
+uniform vec2  VP;
 uniform vec3  EyeFwd;
 uniform vec3  EyeRgt;
 uniform vec3  EyeUp;
@@ -108,7 +109,8 @@ vec3 calcN(vec3 p){
   return normalize(vec3(SDF(p+vec3(e,0,0))-h, SDF(p+vec3(0,e,0))-h, SDF(p+vec3(0,0,e))-h));
 }
 void main(){
-  vec2 uv = (2.0*gl_FragCoord.xy - R) / length(R);
+  // UVs must be relative to this eye's viewport, not the whole framebuffer
+  vec2 uv = (2.0*(gl_FragCoord.xy - VP) - R) / R.y;
   vec3 ray = normalize(EyeFwd + uv.x*EyeRgt + uv.y*EyeUp);
   vec3 ro = EyePos;
   float t = 0.0, steps = -1.0;
@@ -150,6 +152,7 @@ const aP = gl.getAttribLocation(prog, "a_pos"); gl.enableVertexAttribArray(aP); 
 
 const uT  = gl.getUniformLocation(prog, "T");
 const uR  = gl.getUniformLocation(prog, "R");
+const uVP = gl.getUniformLocation(prog, "VP");
 const uFwd= gl.getUniformLocation(prog, "EyeFwd");
 const uRgt= gl.getUniformLocation(prog, "EyeRgt");
 const uUp = gl.getUniformLocation(prog, "EyeUp");
@@ -174,6 +177,7 @@ function drawEyeFromPose(q, pos, eyeRight, vpWidth, vpHeight, time){
   const p = [pos[0] + (eyeRight?sep:-sep)*rgt[0], pos[1] + (eyeRight?sep:-sep)*rgt[1], pos[2] + (eyeRight?sep:-sep)*rgt[2]];
   gl.uniform1f(uT, time/1000);
   gl.uniform2f(uR, vp.width, vp.height);
+  gl.uniform2f(uVP, vp.x, vp.y);
   gl.uniform3fv(uFwd, fwd);
   gl.uniform3fv(uRgt, rgt);
   gl.uniform3fv(uUp,  up);
