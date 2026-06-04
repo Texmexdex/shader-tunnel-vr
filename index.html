@@ -149,7 +149,7 @@ function drawEye(raw, layer, eye, time, xrFrame, pose, view){
   gl.viewport(vp.x, vp.y, vp.width, vp.height);
   // placeholder
   gl.uniform2f(uR, vp.width, vp.height);
-  gl.uniform4f(uEye, eye?1:0,0, vp.width, vp.height);
+  gl.uniform2f(uEye, eye?1:0, 0.0);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
 }
 
