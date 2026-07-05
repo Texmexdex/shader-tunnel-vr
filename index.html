@@ -30,6 +30,7 @@
 </style>
 </head>
 <body>
+<audio id="bgAudio" loop preload="auto" src="../recursive.mp3"></audio>
 <canvas id="c"></canvas>
 <button id="vr" class="ui">Enter VR</button>
 <button id="menuBtn" class="ui">Shaders &#9662;</button>
@@ -780,8 +781,30 @@ function onXRFrame(time, frame) {
   }
 }
 
+/* ===================== persistent audio ===================== */
+const bgAudio = document.getElementById("bgAudio");
+bgAudio.volume = 1.0;
+
+// Browsers require a user gesture before audio can play.
+// Start on the first interaction (click, key, touch, or VR entry).
+function tryPlayAudio() {
+  if (bgAudio.paused) {
+    bgAudio.play().catch(() => {});
+  }
+}
+window.addEventListener("click", tryPlayAudio, { once: false });
+window.addEventListener("keydown", tryPlayAudio, { once: false });
+window.addEventListener("touchstart", tryPlayAudio, { once: false });
+
+// Also ensure audio starts/resumes when entering VR.
+const _origEnterVR = enterVR;
+enterVR = async function() {
+  await _origEnterVR();
+  tryPlayAudio();
+};
+
 /* ===================== go ===================== */
-switchShader(0);
+switchShader(1);
 startDesktopLoop();
 </script>
 </body>
