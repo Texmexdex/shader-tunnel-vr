@@ -106,6 +106,23 @@ window.addEventListener("mousemove", e => {
     lastX = e.clientX; lastY = e.clientY;
   }
 });
+/* Check if camera has passed through the outermost cube face (Recursive Cubes only).
+   The outermost cube has half-size 0.5, so if camera distance from origin < 0.5, reset. */
+function checkCubeBoundary() {
+  if (activeShader !== 1) return; // only applies to Recursive Cubes
+  const dist = Math.sqrt(camPos[0]*camPos[0] + camPos[1]*camPos[1] + camPos[2]*camPos[2]);
+  if (dist < 0.5) {
+    const h = SHADERS[1].home;
+    camPos = h.pos.slice();
+    playerPos = h.pos.slice();
+    const d = h.dir;
+    const len = Math.hypot(d[0], d[1], d[2]) || 1;
+    yaw = Math.atan2(d[0]/len, d[2]/len);
+    pitch = Math.max(-1.5, Math.min(1.5, Math.asin(d[1]/len)));
+    playerYaw = Math.atan2(-d[0]/len, -d[2]/len);
+  }
+}
+
 canvas.addEventListener("wheel", e => {
   const cy = Math.cos(yaw), sy = Math.sin(yaw);
   const cp = Math.cos(pitch), sp = Math.sin(pitch);
@@ -113,6 +130,7 @@ canvas.addEventListener("wheel", e => {
   camPos[0] += cp * sy * amt;
   camPos[1] += sp * amt;
   camPos[2] += cp * cy * amt;
+  checkCubeBoundary();
 }, {passive: true});
 
 window.addEventListener("keydown", e => {
@@ -464,6 +482,7 @@ function desktopFrame(now) {
   camPos[0]+=(fwd[0]*mf+rgt[0]*ms)*speed;
   camPos[1]+=(fwd[1]*mf+rgt[1]*ms+mu)*speed;
   camPos[2]+=(fwd[2]*mf+rgt[2]*ms)*speed;
+  checkCubeBoundary();
 
   const aspect=canvas.width/canvas.height;
   const invProj=invertMat4(perspective(1.1, aspect, 0.01, 100));
@@ -736,6 +755,16 @@ function updateXRInput(session, frame, pose, headWorld, dt) {
   playerPos[0]+=(fwd[0]*mf+right[0]*ms)*speed;
   playerPos[1]+=(fwd[1]*mf+right[1]*ms+mu)*speed;
   playerPos[2]+=(fwd[2]*mf+right[2]*ms)*speed;
+  // In VR, camPos tracks playerPos for boundary check
+  if (activeShader === 1) {
+    const dist = Math.sqrt(playerPos[0]*playerPos[0] + playerPos[1]*playerPos[1] + playerPos[2]*playerPos[2]);
+    if (dist < 0.5) {
+      const h = SHADERS[1].home;
+      playerPos = h.pos.slice();
+      camPos = h.pos.slice();
+      playerYaw = Math.atan2(-h.dir[0], -h.dir[2]);
+    }
+  }
 }
 
 function drawPanel(viewProj) {
