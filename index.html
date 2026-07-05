@@ -106,20 +106,32 @@ window.addEventListener("mousemove", e => {
     lastX = e.clientX; lastY = e.clientY;
   }
 });
-/* Check if camera has passed through the outermost cube face (Recursive Cubes only).
-   The outermost cube has half-size 0.5, so if camera distance from origin < 0.5, reset. */
+/* Check if camera has passed through the cube boundaries (Recursive Cubes only).
+   Inner boundary: camera enters the outermost cube (dist < 0.5) → teleport to outer view.
+   Outer boundary: camera moves too far out (dist > 3.0) → teleport to just outside the cube face.
+   This creates an infinite fractal zoom loop in both directions. */
+const CUBE_INNER = 0.5;   // outermost cube half-size
+const CUBE_OUTER = 3.0;   // starting distance (max zoom out)
+const CUBE_FACE_DIST = 0.7; // just outside the cube face for inward teleport
+
 function checkCubeBoundary() {
   if (activeShader !== 1) return; // only applies to Recursive Cubes
   const dist = Math.sqrt(camPos[0]*camPos[0] + camPos[1]*camPos[1] + camPos[2]*camPos[2]);
-  if (dist < 0.5) {
+
+  if (dist < CUBE_INNER) {
+    // Passed through the cube face inward → teleport to outer starting position
+    // Maintain current look direction so it feels like continuous travel
     const h = SHADERS[1].home;
     camPos = h.pos.slice();
     playerPos = h.pos.slice();
-    const d = h.dir;
-    const len = Math.hypot(d[0], d[1], d[2]) || 1;
-    yaw = Math.atan2(d[0]/len, d[2]/len);
-    pitch = Math.max(-1.5, Math.min(1.5, Math.asin(d[1]/len)));
-    playerYaw = Math.atan2(-d[0]/len, -d[2]/len);
+  } else if (dist > CUBE_OUTER) {
+    // Pulled back too far → teleport to just outside the cube face
+    // Normalize direction and place camera at the face distance
+    const nx = camPos[0] / dist, ny = camPos[1] / dist, nz = camPos[2] / dist;
+    camPos[0] = nx * CUBE_FACE_DIST;
+    camPos[1] = ny * CUBE_FACE_DIST;
+    camPos[2] = nz * CUBE_FACE_DIST;
+    playerPos = camPos.slice();
   }
 }
 
@@ -755,14 +767,19 @@ function updateXRInput(session, frame, pose, headWorld, dt) {
   playerPos[0]+=(fwd[0]*mf+right[0]*ms)*speed;
   playerPos[1]+=(fwd[1]*mf+right[1]*ms+mu)*speed;
   playerPos[2]+=(fwd[2]*mf+right[2]*ms)*speed;
-  // In VR, camPos tracks playerPos for boundary check
+  // In VR, check cube fractal boundaries
   if (activeShader === 1) {
     const dist = Math.sqrt(playerPos[0]*playerPos[0] + playerPos[1]*playerPos[1] + playerPos[2]*playerPos[2]);
-    if (dist < 0.5) {
+    if (dist < CUBE_INNER) {
       const h = SHADERS[1].home;
       playerPos = h.pos.slice();
       camPos = h.pos.slice();
-      playerYaw = Math.atan2(-h.dir[0], -h.dir[2]);
+    } else if (dist > CUBE_OUTER) {
+      const nx = playerPos[0]/dist, ny = playerPos[1]/dist, nz = playerPos[2]/dist;
+      playerPos[0] = nx * CUBE_FACE_DIST;
+      playerPos[1] = ny * CUBE_FACE_DIST;
+      playerPos[2] = nz * CUBE_FACE_DIST;
+      camPos = playerPos.slice();
     }
   }
 }
