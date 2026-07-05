@@ -786,22 +786,25 @@ const bgAudio = document.getElementById("bgAudio");
 bgAudio.volume = 1.0;
 
 // Browsers require a user gesture before audio can play.
-// Start on the first interaction (click, key, touch, or VR entry).
+// Attach to multiple interaction types and keep retrying until it works.
 function tryPlayAudio() {
   if (bgAudio.paused) {
-    bgAudio.play().catch(() => {});
+    bgAudio.play().then(() => {
+      // Success — remove listeners to avoid repeated calls.
+      document.removeEventListener("click", tryPlayAudio, true);
+      document.removeEventListener("keydown", tryPlayAudio, true);
+      document.removeEventListener("touchstart", tryPlayAudio, true);
+      document.removeEventListener("mousedown", tryPlayAudio, true);
+      document.removeEventListener("pointerdown", tryPlayAudio, true);
+    }).catch(() => {});
   }
 }
-window.addEventListener("click", tryPlayAudio, { once: false });
-window.addEventListener("keydown", tryPlayAudio, { once: false });
-window.addEventListener("touchstart", tryPlayAudio, { once: false });
-
-// Also ensure audio starts/resumes when entering VR.
-const _origEnterVR = enterVR;
-enterVR = async function() {
-  await _origEnterVR();
-  tryPlayAudio();
-};
+// Use capture phase so we fire before pointer lock or other handlers consume the event.
+document.addEventListener("click", tryPlayAudio, true);
+document.addEventListener("keydown", tryPlayAudio, true);
+document.addEventListener("touchstart", tryPlayAudio, true);
+document.addEventListener("mousedown", tryPlayAudio, true);
+document.addEventListener("pointerdown", tryPlayAudio, true);
 
 /* ===================== go ===================== */
 switchShader(1);
